@@ -658,23 +658,77 @@ const aiService = {
 };
 
 /* ── Auth + email capture ───────────────────────────────────────────
-   🔌 GOOGLE OAUTH CONNECTION POINT
-   With a real CLIENT_ID in CONFIG.GOOGLE_OAUTH, wire Google Identity
-   Services like this (drop-in — the UI already calls onSignIn):
+   🔌 GOOGLE OAUTH — LIVE. Real Google Identity Services flow driven by
+   CONFIG.GOOGLE_OAUTH.CLIENT_ID. The origin the app runs on must be
+   listed under "Authorized JavaScript origins" for that Client ID in
+   console.cloud.google.com (add http://localhost:5173 and your Vercel
+   domain). If the GIS script cannot load or the origin isn't
+   authorized, the UI falls back to the demo chooser so sign-in stays
+   testable anywhere.
+   NOTE: the ID token is decoded client-side for UI display only —
+   verify it server-side (signature + aud) before trusting it for
+   real user data.                                                     */
+const googleAuth = {
+  _loader: null,
+  configured() {
+    const id = CONFIG.GOOGLE_OAUTH.CLIENT_ID;
+    return !!id && !id.startsWith("YOUR_");
+  },
+  load() {
+    if (!this._loader) {
+      this._loader = new Promise((resolve, reject) => {
+        if (window.google && window.google.accounts) return resolve();
+        const s = document.createElement("script");
+        s.src = "https://accounts.google.com/gsi/client";
+        s.async = true;
+        s.defer = true;
+        s.onload = () => resolve();
+        s.onerror = () => { this._loader = null; reject(new Error("GIS script failed to load")); };
+        document.head.appendChild(s);
+      });
+    }
+    return this._loader;
+  },
+  /* UTF-8-safe base64url decode of the ID-token payload (names like
+     "Bjørn" survive intact). */
+  decodeJwt(credential) {
+    const b64 = credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = decodeURIComponent(
+      atob(b64).split("").map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)).join("")
+    );
+    return JSON.parse(json);
+  },
+  async init(onProfile) {
+    if (!this.configured()) throw new Error("No Client ID configured");
+    await this.load();
+    window.google.accounts.id.initialize({
+      client_id: CONFIG.GOOGLE_OAUTH.CLIENT_ID,
+      auto_select: false,
+      callback: (res) => {
+        const p = this.decodeJwt(res.credential);
+        onProfile({ name: p.name || p.email, email: p.email, picture: p.picture, sub: p.sub });
+      },
+    });
+  },
+  renderButton(el) {
+    window.google.accounts.id.renderButton(el, {
+      theme: "outline", size: "large", shape: "pill",
+      text: "continue_with", logo_alignment: "left", width: 300,
+    });
+  },
+  prompt() {
+    try { window.google.accounts.id.prompt(); } catch (e) { /* One Tap is optional */ }
+  },
+  signOut() {
+    try { window.google.accounts.id.disableAutoSelect(); } catch (e) { /* GIS not loaded */ }
+  },
+};
 
-     const s = document.createElement("script");
-     s.src = "https://accounts.google.com/gsi/client";
-     s.onload = () => window.google.accounts.id.initialize({
-       client_id: CONFIG.GOOGLE_OAUTH.CLIENT_ID,
-       callback: (res) => {
-         const p = JSON.parse(atob(res.credential.split(".")[1]));
-         onSignIn({ name: p.name, email: p.email }); // email auto-captured below
-       },
-     });
-     document.head.appendChild(s);
+const AVATAR_COLORS = ["#3ea6ff", "#2ba640", "#ff9500", "#e91e63", "#9c6bff", "#00bcd4"];
+const colorForEmail = (email) => AVATAR_COLORS[hash(email) % AVATAR_COLORS.length];
 
-   Until credentials exist, a pixel-faithful mock account chooser runs
-   the exact same onSignIn path, so nothing else changes later.       */
+/* Fallback demo accounts — shown only when real GIS is unavailable on
+   the current origin (unauthorized domain / blocked script).         */
 
 const MOCK_GOOGLE_ACCOUNTS = [
   { name: "Aidrus", email: "aidrus.founder@gmail.com", color: "#3ea6ff" },
@@ -1290,7 +1344,11 @@ function Header({ onMenu, onBrand, query, setQuery, onAsk, notifCount, onBell, u
         </button>
         <button className="ibtn" onClick={onProfile} aria-label="Profile">
           {user ? (
-            <div className="avatar" style={{ background: user.color }}>{user.name[0]}</div>
+            <div className="avatar" style={{ background: user.color }}>
+              {user.picture
+                ? <img src={user.picture} alt="" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+                : user.name[0]}
+            </div>
           ) : (
             <Icon name="person" />
           )}
@@ -1424,7 +1482,11 @@ function ProfileMenu({ user, data, onGoogle, onSignOut, onSaved, onClose }) {
       <div className="menu" role="menu">
         <div className="pf-head">
           {user ? (
-            <div className="avatar" style={{ background: user.color, width: 42, height: 42, fontSize: 17 }}>{user.name[0]}</div>
+            <div className="avatar" style={{ background: user.color, width: 42, height: 42, fontSize: 17 }}>
+              {user.picture
+                ? <img src={user.picture} alt="" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+                : user.name[0]}
+            </div>
           ) : (
             <div className="avatar" style={{ background: "#3a3a3a", width: 42, height: 42 }}>
               <Icon name="person" size={22} />
@@ -1471,32 +1533,73 @@ function ProfileMenu({ user, data, onGoogle, onSignOut, onSaved, onClose }) {
    🔌 Swaps out untouched once CONFIG.GOOGLE_OAUTH.CLIENT_ID is real:
    the live callback calls the same onPick({ name, email }).          */
 function GoogleModal({ onPick, onClose }) {
+  const btnRef = React.useRef(null);
+  const [gis, setGis] = React.useState(googleAuth.configured() ? "loading" : "mock");
+
+  /* initialize real Google Identity Services; fall back to demo mode */
+  React.useEffect(() => {
+    if (!googleAuth.configured()) return;
+    let dead = false;
+    googleAuth
+      .init((p) => onPick({ name: p.name, email: p.email, picture: p.picture, color: colorForEmail(p.email), real: true }))
+      .then(() => { if (!dead) setGis("ready"); })
+      .catch(() => { if (!dead) setGis("mock"); });
+    return () => { dead = true; };
+  }, [onPick]);
+
+  /* render the official button (and offer One Tap) once GIS is ready */
+  React.useEffect(() => {
+    if (gis !== "ready" || !btnRef.current) return;
+    try {
+      googleAuth.renderButton(btnRef.current);
+      googleAuth.prompt();
+    } catch (e) {
+      setGis("mock");
+    }
+  }, [gis]);
+
   return (
     <div className="gm-scrim" onClick={onClose} role="button" aria-label="Close sign-in">
       <div className="gm" onClick={(e) => e.stopPropagation()} role="dialog">
         <GoogleG size={30} />
-        <h4>Choose an account</h4>
+        <h4>{gis === "mock" ? "Choose an account" : "Sign in to News30"}</h4>
         <p>to continue to <b style={{ color: "#1f1f1f" }}>News30</b></p>
-        {MOCK_GOOGLE_ACCOUNTS.map((a) => (
-          <button key={a.email} className="gm-acc" onClick={() => onPick(a)}>
-            <span className="gm-av" style={{ background: a.color }}>{a.name[0]}</span>
-            <span>
-              <b>{a.name}</b>
-              <span>{a.email}</span>
-            </span>
-          </button>
-        ))}
-        <button className="gm-acc" onClick={() => onPick(null)}>
-          <span className="gm-av" style={{ background: "#e8eaed", color: "#5f6368" }}>
-            <Icon name="person" size={19} />
-          </span>
-          <span><b>Use another account</b></span>
-        </button>
-        <div className="gm-note">
-          Demo sign-in: this dialog simulates Google OAuth until a real Client ID is added in
-          CONFIG.GOOGLE_OAUTH. Emails are captured on sign-in for re-engagement campaigns
-          (CONFIG.EMAIL — Mailchimp / Resend ready).
-        </div>
+
+        {gis === "loading" && (
+          <div style={{ display: "flex", justifyContent: "center", padding: "20px 0" }}>
+            <div className="spin" style={{ margin: 0, borderColor: "#dadce0", borderTopColor: "#1a73e8" }} />
+          </div>
+        )}
+
+        {gis === "ready" && (
+          <React.Fragment>
+            <div ref={btnRef} style={{ display: "flex", justifyContent: "center", padding: "8px 0 2px" }} />
+            <div className="gm-note">
+              Real Google sign-in. Your streak, points and quiz accuracy attach to this
+              account, and your email is captured for re-engagement flows (CONFIG.EMAIL).
+            </div>
+          </React.Fragment>
+        )}
+
+        {gis === "mock" && (
+          <React.Fragment>
+            {MOCK_GOOGLE_ACCOUNTS.map((a) => (
+              <button key={a.email} className="gm-acc" onClick={() => onPick(a)}>
+                <span className="gm-av" style={{ background: a.color }}>{a.name[0]}</span>
+                <span>
+                  <b>{a.name}</b>
+                  <span>{a.email}</span>
+                </span>
+              </button>
+            ))}
+            <div className="gm-note">
+              Google sign-in couldn't load on this origin, so this is the demo chooser.
+              It goes real automatically once this domain is listed under "Authorized
+              JavaScript origins" for your Client ID at console.cloud.google.com.
+            </div>
+          </React.Fragment>
+        )}
+
         <button className="gm-cancel" onClick={onClose}>Cancel</button>
       </div>
     </div>
@@ -2558,20 +2661,27 @@ function App() {
     runAsk("Tell me more about: " + story.headline);
   };
 
-  /* Google OAuth (mock chooser → same shape as real GIS callback) */
+  /* Google sign-in — receives a real decoded GIS profile, or a demo
+     account when GIS is unavailable on this origin. Same shape both
+     ways, so nothing downstream cares which path fired. */
   const onGooglePick = (acct) => {
-    if (!acct) {
-      toast("Add a real Client ID in CONFIG.GOOGLE_OAUTH to connect more accounts", "lock");
-      return;
-    }
+    if (!acct) return;
     setGoogleOpen(false);
-    const u = { name: acct.name, email: acct.email, color: acct.color };
+    const u = {
+      name: acct.name,
+      email: acct.email,
+      color: acct.color || colorForEmail(acct.email),
+      picture: acct.picture || null,
+    };
     setUser(u);
     emailService.captureEmail(acct.email, acct.name, "google_signin"); // 🔌 Mailchimp/Resend
     dispatch({ type: "LOGIN" });
     toast("Signed in as " + acct.name.split(" ")[0], "check");
   };
-  const signOut = () => { setUser(null); setMenu(null); toast("Signed out", "person"); };
+  const signOut = () => {
+    googleAuth.signOut(); // stop One Tap from silently re-selecting
+    setUser(null); setMenu(null); toast("Signed out", "person");
+  };
 
   const mainCls = cls("main", !mobile && (canFull && sbFull ? "sb-full" : "sb-mini-pad"));
   const sbMode = mobile ? "hidden" : canFull && sbFull ? "full" : "mini";
