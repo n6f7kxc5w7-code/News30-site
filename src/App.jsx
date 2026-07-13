@@ -39,7 +39,7 @@ const CONFIG = {
     // 2. Paste the Client ID below and add your domain to authorized origins
     // 3. CLIENT_SECRET belongs on your SERVER only — never in browser code.
     //    It is listed here purely as the labelled placeholder requested.
-    CLIENT_ID: "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    CLIENT_ID: "538312385751-r7mj5q8slibo3irg0sr32kf0378mvj18.apps.googleusercontent.com",
     CLIENT_SECRET: "YOUR_GOOGLE_CLIENT_SECRET (server-side only)",
   },
   EMAIL: {
