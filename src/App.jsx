@@ -18,47 +18,58 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } 
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
+/* Reads a Vite env var safely (also safe outside Vite, e.g. artifact
+   preview, where import.meta.env is undefined). Set these in Vercel →
+   Settings → Environment Variables, or a local .env.local file.      */
+const env = (key) =>
+  (typeof import.meta !== "undefined" && import.meta.env && import.meta.env[key]) || "";
+
 const CONFIG = {
   AI: {
     // 🔌 AI API CONNECTION POINT ─────────────────────────────────────
     // Inside the Claude.ai artifact preview this endpoint works with NO
-    // key (handled by the environment). For an external deployment:
-    //   1. Put your Anthropic API key in API_KEY below
-    //   2. (Recommended) proxy the call through your own backend so the
-    //      key is never shipped to the browser.
+    // key (handled by the environment). For an external deployment set
+    // VITE_ANTHROPIC_API_KEY, and (recommended) proxy the call through
+    // your own backend so the key is never shipped to the browser.
     ENDPOINT: "https://api.anthropic.com/v1/messages",
     MODEL: "claude-sonnet-4-6",
-    // In a Vite deploy: set VITE_ANTHROPIC_API_KEY in Vercel → Settings →
-    // Environment Variables (it is picked up automatically below).
-    API_KEY:
-      (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_ANTHROPIC_API_KEY) || "",
+    API_KEY: env("VITE_ANTHROPIC_API_KEY"),
   },
   GOOGLE_OAUTH: {
-    // 🔌 GOOGLE OAUTH CONNECTION POINT ───────────────────────────────
-    // 1. Create credentials at console.cloud.google.com → APIs → OAuth
-    // 2. Paste the Client ID below and add your domain to authorized origins
-    // 3. CLIENT_SECRET belongs on your SERVER only — never in browser code.
-    //    It is listed here purely as the labelled placeholder requested.
+    // 🔌 GOOGLE OAUTH — LIVE ─────────────────────────────────────────
+    // Client IDs are public by design; domains must be listed under
+    // "Authorized JavaScript origins" in console.cloud.google.com.
+    // The client SECRET is not public — it belongs on a server only
+    // and is deliberately absent from this file.
     CLIENT_ID: "538312385751-r7mj5q8slibo3irg0sr32kf0378mvj18.apps.googleusercontent.com",
-    CLIENT_SECRET: "YOUR_GOOGLE_CLIENT_SECRET (server-side only)",
   },
   EMAIL: {
     // 🔌 EMAIL SERVICE CONNECTION POINT (Mailchimp / Resend / etc.) ──
+    // Sending belongs server-side; these envs exist for when the calls
+    // are proxied through your backend.
     PROVIDER: "resend", // or "mailchimp"
-    API_KEY: "YOUR_EMAIL_SERVICE_API_KEY",
-    AUDIENCE_ID: "YOUR_AUDIENCE_OR_LIST_ID",
+    API_KEY: env("VITE_EMAIL_API_KEY"),
+    AUDIENCE_ID: env("VITE_EMAIL_AUDIENCE_ID"),
   },
   NEWS_API: {
-    // 🔌 NEWS API CONNECTION POINT ───────────────────────────────────
-    // Story objects below mirror NewsAPI's article shape — see the
-    // mapping comment above SAMPLE data in section 3.
+    // 🔌 NEWS API — LIVE ─────────────────────────────────────────────
+    // With VITE_NEWSAPI_KEY set, the feed pulls real top headlines and
+    // maps them onto the app's story shape (see newsService below).
+    // Without it — or if the request fails — the curated sample
+    // stories load instead, so the app never breaks.
+    // NOTE: newsapi.org's free Developer tier only allows browser
+    // requests from localhost; on a deployed domain use a paid plan or
+    // proxy this call through a serverless function.
     ENDPOINT: "https://newsapi.org/v2/top-headlines",
-    API_KEY: "YOUR_NEWSAPI_KEY",
+    API_KEY: env("VITE_NEWSAPI_KEY"),
   },
   DATABASE: {
-    // 🔌 DATABASE CONNECTION POINT (Supabase / Firebase) ─────────────
-    SUPABASE_URL: "YOUR_SUPABASE_PROJECT_URL",
-    SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_KEY",
+    // 🔌 DATABASE — LIVE (Supabase) ──────────────────────────────────
+    // With both vars set, signed-in users' data (quiz results, login
+    // streaks, likes, saves, video engagement) persists to Supabase.
+    // The db service below has the REST calls + required table SQL.
+    SUPABASE_URL: env("VITE_SUPABASE_URL"),
+    SUPABASE_ANON_KEY: env("VITE_SUPABASE_ANON_KEY"),
   },
   DEBUG_TRACKING: true, // logs every tracked event to the console
 };
@@ -396,9 +407,113 @@ function makeArchiveStory(category, idx) {
   };
 }
 
+/* ── LIVE NEWS (NewsAPI) ────────────────────────────────────────────
+   🔌 With VITE_NEWSAPI_KEY set, newsService.load() pulls real top
+   headlines per category and maps every article onto the exact story
+   shape the whole UI already consumes — cards, player, panels, quizzes
+   and deep links all work unchanged. Falls back to the curated sample
+   stories whenever the key is missing or a request fails.            */
+
+const NEWS_CATEGORY_MAP = { geopolitics: "general", finance: "business", sports: "sports" };
+const LIVE_KICKERS = {
+  geopolitics: ["WORLD", "GLOBAL", "DIPLOMACY", "BREAKING"],
+  finance: ["MARKETS", "ECONOMY", "MONEY", "BUSINESS"],
+  sports: ["SPORTS", "MATCHDAY", "SCORES", "GAME ON"],
+};
+/* Light-touch outlet lean map for the visual bias tags (defaults to
+   Centre for anything unlisted — extend freely).                     */
+const OUTLET_BIAS = {
+  "the guardian": "left", "guardian": "left", "cnn": "left", "msnbc": "left",
+  "huffpost": "left", "vox": "left",
+  "fox news": "right", "new york post": "right", "breitbart": "right",
+  "daily mail": "right", "the telegraph": "right",
+};
+
+const LIVE = { ready: false, stories: { geopolitics: [], finance: [], sports: [] } };
+const LIVE_CACHE = new Map(); // id → story (deep links, saved items, notifications)
+
+function mapArticle(a, category, idx) {
+  const headline = (a.title || "").replace(/\s+[-|\u2013]\s+[^-|\u2013]+$/, "").trim();
+  const srcName = ((a.source && a.source.name) || "Newswire").replace(/\.(com|org|net)$/i, "");
+  const seed = hash(a.url || headline) + idx;
+  const rnd = seeded(seed);
+  const durationSec = 25 + Math.floor(rnd() * 21);
+  const story = {
+    id: "live-" + category + "-" + (hash(a.url || headline) % 100000),
+    category,
+    headline,
+    kicker: LIVE_KICKERS[category][seed % LIVE_KICKERS[category].length],
+    source: srcName,
+    bias: OUTLET_BIAS[srcName.toLowerCase()] || "centre",
+    fact: "verified",
+    publishedAt: Date.parse(a.publishedAt) || NOW,
+    duration: fmtDur(durationSec),
+    durationSec,
+    views: 800 + Math.floor(rnd() * 240000), // placeholder metric until real analytics
+    seed,
+    url: a.url, // original article link (extra field — UI ignores unknown keys)
+  };
+  LIVE_CACHE.set(story.id, story);
+  return story;
+}
+
+const newsService = {
+  enabled() { return !!CONFIG.NEWS_API.API_KEY; },
+  isLive() { return LIVE.ready; },
+  async load() {
+    if (!this.enabled()) return false;
+    try {
+      const cats = Object.keys(NEWS_CATEGORY_MAP);
+      const results = await Promise.all(cats.map(async (cat) => {
+        const u = CONFIG.NEWS_API.ENDPOINT +
+          "?category=" + NEWS_CATEGORY_MAP[cat] +
+          "&language=en&pageSize=30&apiKey=" + CONFIG.NEWS_API.API_KEY;
+        const r = await fetch(u);
+        if (!r.ok) throw new Error("NewsAPI " + r.status);
+        const j = await r.json();
+        return (j.articles || [])
+          .filter((a) => a.title && a.title !== "[Removed]" && a.url)
+          .map((a, i) => mapArticle(a, cat, i));
+      }));
+      cats.forEach((cat, i) => { LIVE.stories[cat] = results[i]; });
+      LIVE.ready = results.some((r) => r.length > 0);
+      track("news_live_loaded", { geopolitics: LIVE.stories.geopolitics.length, finance: LIVE.stories.finance.length, sports: LIVE.stories.sports.length });
+      return LIVE.ready;
+    } catch (e) {
+      LIVE.ready = false; // graceful fallback → curated sample stories
+      track("news_live_failed", { error: String(e) });
+      return false;
+    }
+  },
+  /** One page of live stories for a category ('all' interleaves). */
+  page(category, page) {
+    const pick = (c) => LIVE.stories[c] || [];
+    let pool;
+    if (category === "all") {
+      pool = [];
+      const cats = ["geopolitics", "finance", "sports"];
+      const max = Math.max(...cats.map((c) => pick(c).length));
+      for (let i = 0; i < max; i++) for (const c of cats) if (pick(c)[i]) pool.push(pick(c)[i]);
+    } else {
+      pool = pick(category);
+    }
+    return pool.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  },
+  all() {
+    return [...LIVE.stories.geopolitics, ...LIVE.stories.finance, ...LIVE.stories.sports];
+  },
+};
+
 const PAGE_SIZE = 12;
-/** Feed pager. Page 0 = today's curated stories; deeper pages walk back in time. */
+/** Feed pager. Serves live NewsAPI headlines when loaded; otherwise
+    page 0 = curated samples and deeper pages walk back through the
+    dated archive. In live mode, pages beyond the API supply continue
+    into the archive so infinite scroll never dead-ends. */
 function getFeed(category, page) {
+  if (newsService.isLive()) {
+    const live = newsService.page(category, page);
+    if (live.length) return live;
+  }
   if (page === 0) {
     if (category === "all") return CURATED_ALL.slice().sort((a, b) => b.publishedAt - a.publishedAt);
     return CURATED[category].slice();
@@ -415,11 +530,12 @@ function getFeed(category, page) {
 }
 
 function getTrending() {
-  const pool = [...getFeed("all", 0), ...getFeed("all", 1)];
-  return pool.sort((a, b) => b.views - a.views).slice(0, 18);
+  const pool = newsService.isLive() ? newsService.all() : [...getFeed("all", 0), ...getFeed("all", 1)];
+  return pool.slice().sort((a, b) => b.views - a.views).slice(0, 18);
 }
 
 function findStoryById(id) {
+  if (LIVE_CACHE.has(id)) return LIVE_CACHE.get(id);
   if (CURATED_BY_ID[id]) return CURATED_BY_ID[id];
   if (id === "s-live1") return makeBreakingStory();
   const m = /^(geopolitics|finance|sports)-a(\d+)$/.exec(id);
@@ -430,13 +546,14 @@ function findStoryById(id) {
 /* ════════════════════ 5 · SERVICES & TRACKING ══════════════════════ */
 
 /* ── Tracking store ─────────────────────────────────────────────────
-   🔌 DATABASE CONNECTION POINT (Supabase / Firebase)
-   All user activity flows through ONE reducer into ONE structured
-   store (nothing scattered in UI code). Each action also calls the
-   matching db.* stub — replace the stub bodies with real writes and
-   tracking becomes fully persistent. This store already powers the
-   profile stats and is shaped to power the leaderboard + dashboard
-   drawer planned for later builds.                                   */
+   🔌 DATABASE — LIVE (Supabase). All user activity flows through ONE
+   pure reducer into ONE structured store. When a user is signed in and
+   Supabase is configured, App (a) hydrates this store from the
+   user_state table on login, (b) upserts the whole store back on every
+   change (debounced), and (c) mirrors each action to the events table.
+   Signed-out or unconfigured → exact same behaviour as before, local
+   state only. The store powers the profile stats and is shaped for the
+   leaderboard + dashboard drawer planned for later builds.           */
 
 const todayKey = () => new Date().toDateString();
 const yesterdayKey = () => new Date(Date.now() - 86400000).toDateString();
@@ -453,31 +570,106 @@ function track(event, payload) {
 }
 
 const db = {
-  /* Replace each body with a real write, e.g. for Supabase:
-     const supabase = createClient(CONFIG.DATABASE.SUPABASE_URL, CONFIG.DATABASE.SUPABASE_ANON_KEY); */
-  async trackVideoWatch(storyId, category) {
-    // 🔌 SUPABASE: await supabase.from("video_events").insert({ story_id: storyId, category, watched_at: new Date() })
+  /* 🔌 SUPABASE — LIVE via PostgREST (fetch-only, no client library).
+     Required schema — run once in Supabase → SQL editor:
+
+       create table if not exists user_state (
+         user_email text primary key,
+         data jsonb not null,
+         updated_at timestamptz default now()
+       );
+       create table if not exists events (
+         id bigint generated always as identity primary key,
+         user_email text,
+         event text not null,
+         payload jsonb,
+         at timestamptz default now()
+       );
+
+     Pre-alpha note: the anon key + open tables means anyone could write
+     rows. Fine while testing; before launch move to Supabase Auth
+     (verify the Google ID token server-side) with per-user RLS
+     policies keyed on the authenticated identity.                     */
+  enabled() {
+    return !!(CONFIG.DATABASE.SUPABASE_URL && CONFIG.DATABASE.SUPABASE_ANON_KEY);
   },
-  async saveLike(storyId, liked) {
-    // 🔌 SUPABASE: await supabase.from("likes").upsert({ story_id: storyId, liked })
+  headers(extra) {
+    return Object.assign(
+      {
+        "Content-Type": "application/json",
+        apikey: CONFIG.DATABASE.SUPABASE_ANON_KEY,
+        Authorization: "Bearer " + CONFIG.DATABASE.SUPABASE_ANON_KEY,
+      },
+      extra || {}
+    );
   },
-  async saveBookmark(storyId, saved) {
-    // 🔌 SUPABASE: await supabase.from("bookmarks").upsert({ story_id: storyId, saved })
+  url(path) {
+    return CONFIG.DATABASE.SUPABASE_URL.replace(/\/$/, "") + "/rest/v1/" + path;
   },
-  async saveQuizResult(result) {
-    // 🔌 SUPABASE: await supabase.from("quiz_results").insert(result)
+  /** Fetch a user's persisted state; null when absent/disabled/failed. */
+  async loadUserData(email) {
+    if (!this.enabled()) return null;
+    try {
+      const r = await fetch(
+        this.url("user_state?user_email=eq." + encodeURIComponent(email) + "&select=data"),
+        { headers: this.headers() }
+      );
+      if (!r.ok) throw new Error("load " + r.status);
+      const rows = await r.json();
+      return rows.length ? rows[0].data : null;
+    } catch (e) {
+      track("db_load_failed", { error: String(e) });
+      return null;
+    }
   },
-  async updateLoginStreak(loginActivity) {
-    // 🔌 SUPABASE: await supabase.from("profiles").update({ streak: loginActivity.streak, ... })
+  /** Upsert the entire user state blob (called debounced from App). */
+  async saveUserData(email, data) {
+    if (!this.enabled()) return false;
+    try {
+      const r = await fetch(this.url("user_state?on_conflict=user_email"), {
+        method: "POST",
+        headers: this.headers({ Prefer: "resolution=merge-duplicates" }),
+        body: JSON.stringify({ user_email: email, data, updated_at: new Date().toISOString() }),
+      });
+      if (!r.ok) throw new Error("save " + r.status);
+      return true;
+    } catch (e) {
+      track("db_save_failed", { error: String(e) });
+      return false;
+    }
+  },
+  /** Fire-and-forget event stream (quiz answers, watches, logins…). */
+  logEvent(email, event, payload) {
+    if (!this.enabled()) return;
+    fetch(this.url("events"), {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ user_email: email || null, event, payload: payload || null }),
+    }).catch(() => {});
   },
 };
 
 function userDataReducer(state, action) {
   switch (action.type) {
+    /* Replace local state with the persisted copy loaded from Supabase.
+       Section-wise merge over the initial shape so older saved blobs
+       survive future store-shape changes. */
+    case "HYDRATE": {
+      const base = initialUserData();
+      const d = action.data || {};
+      return {
+        profile: { ...base.profile, ...(d.profile || {}) },
+        loginActivity: { ...base.loginActivity, ...(d.loginActivity || {}) },
+        engagement: { ...base.engagement, ...(d.engagement || {}) },
+        quizActivity: Array.isArray(d.quizActivity) ? d.quizActivity : [],
+      };
+    }
+    /* Sign-out: wipe local copy (the account's data lives server-side). */
+    case "RESET":
+      return initialUserData();
     case "VIDEO_WATCHED": {
       const { story } = action;
       if (state.engagement.watchedIds.includes(story.id)) return state;
-      db.trackVideoWatch(story.id, story.category);
       track("video_watched", { id: story.id, category: story.category });
       const categoryCounts = { ...state.engagement.categoryCounts };
       categoryCounts[story.category] = (categoryCounts[story.category] || 0) + 1;
@@ -494,7 +686,6 @@ function userDataReducer(state, action) {
     case "LIKE_TOGGLED": {
       const { storyId } = action;
       const liked = !state.engagement.likedIds.includes(storyId);
-      db.saveLike(storyId, liked);
       track("like_toggled", { storyId, liked });
       return {
         ...state,
@@ -509,7 +700,6 @@ function userDataReducer(state, action) {
     case "SAVE_TOGGLED": {
       const { storyId } = action;
       const saved = !state.engagement.savedIds.includes(storyId);
-      db.saveBookmark(storyId, saved);
       track("save_toggled", { storyId, saved });
       return {
         ...state,
@@ -523,7 +713,6 @@ function userDataReducer(state, action) {
     }
     case "QUIZ_COMPLETE": {
       const { result } = action; // { storyId, answers, points, completedAt }
-      db.saveQuizResult(result);
       track("quiz_complete", result);
       const quizActivity = [...state.quizActivity, result];
       let total = 0, correct = 0;
@@ -547,7 +736,6 @@ function userDataReducer(state, action) {
         totalDaysActive: state.loginActivity.totalDaysActive + 1,
         lastLoginDate: todayKey(),
       };
-      db.updateLoginStreak(loginActivity);
       track("login", loginActivity);
       return { ...state, loginActivity };
     }
@@ -672,7 +860,7 @@ const googleAuth = {
   _loader: null,
   configured() {
     const id = CONFIG.GOOGLE_OAUTH.CLIENT_ID;
-    return !!id && !id.startsWith("YOUR_");
+    return !!id && id.endsWith(".apps.googleusercontent.com");
   },
   load() {
     if (!this._loader) {
@@ -1648,7 +1836,7 @@ const SkeletonCard = () => (
 
 const MAX_PAGES = 8;
 
-function InfiniteFeed({ category, fresh, openPlayer, onCardMenu }) {
+function InfiniteFeed({ category, fresh, feedVersion, openPlayer, onCardMenu }) {
   const [pages, setPages] = React.useState(1);
   const [loading, setLoading] = React.useState(false);
   const sentRef = React.useRef(null);
@@ -1660,7 +1848,7 @@ function InfiniteFeed({ category, fresh, openPlayer, onCardMenu }) {
     for (let p = 0; p < pages; p++) out = out.concat(getFeed(category, p));
     const fr = (fresh || []).filter((s) => category === "all" || s.category === category);
     return [...fr, ...out];
-  }, [category, pages, fresh]);
+  }, [category, pages, fresh, feedVersion]);
 
   const done = pages >= MAX_PAGES;
 
@@ -1717,17 +1905,17 @@ function ChipsRow({ category, setCategory }) {
   );
 }
 
-function HomeView({ category, setCategory, fresh, openPlayer, onCardMenu }) {
+function HomeView({ category, setCategory, fresh, feedVersion, openPlayer, onCardMenu }) {
   return (
     <div className="page">
       <ChipsRow category={category} setCategory={setCategory} />
-      <InfiniteFeed category={category} fresh={fresh} openPlayer={openPlayer} onCardMenu={onCardMenu} />
+      <InfiniteFeed category={category} fresh={fresh} feedVersion={feedVersion} openPlayer={openPlayer} onCardMenu={onCardMenu} />
     </div>
   );
 }
 
-function TrendingView({ openPlayer, onCardMenu }) {
-  const items = React.useMemo(getTrending, []);
+function TrendingView({ feedVersion, openPlayer, onCardMenu }) {
+  const items = React.useMemo(getTrending, [feedVersion]);
   return (
     <div className="page">
       <div className="ph"><Icon name="flame" size={24} /> Trending on News30</div>
@@ -2588,11 +2776,23 @@ function App() {
     return () => { document.head.removeChild(style); document.title = prevTitle; };
   }, []);
 
-  /* Demo of live "breaking news" — a new story posts 30s after load,
-     lands top of feed + fires a notification + toast. 🔌 Real build:
-     websocket / polling NEWS_API pushes into `fresh` + `notifs`.     */
+  /* 🔌 LIVE NEWS: pull real headlines on mount when VITE_NEWSAPI_KEY is
+     set. `newsVersion` bumps once loaded so the feed re-renders with
+     real stories; on failure everything stays on the curated samples. */
+  const [newsVersion, setNewsVersion] = React.useState(0);
+  React.useEffect(() => {
+    newsService.load().then((ok) => {
+      if (ok) { setNewsVersion(1); toast("Live headlines loaded", "flame"); }
+    });
+  }, [toast]);
+
+  /* Demo of "breaking news" — a sample story posts 30s after load,
+     lands top of feed + fires a notification + toast. Skipped once
+     real NewsAPI headlines are live. 🔌 Real build: websocket /
+     polling NEWS_API pushes into `fresh` + `notifs`.                 */
   React.useEffect(() => {
     const t = setTimeout(() => {
+      if (newsService.isLive()) return;
       const b = makeBreakingStory();
       setFresh((f) => [b, ...f]);
       setNotifs((n) => [{ id: "live-" + b.id, storyId: b.id, title: b.headline, at: b.publishedAt, read: false }, ...n]);
@@ -2600,6 +2800,26 @@ function App() {
     }, 30000);
     return () => clearTimeout(t);
   }, [toast]);
+
+  /* 🔌 SUPABASE PERSISTENCE: debounced whole-state upsert on every
+     change while signed in. Guests / unconfigured = local-only. */
+  const userRef = React.useRef(null);
+  userRef.current = user;
+  React.useEffect(() => {
+    if (!user || !db.enabled()) return;
+    const t = setTimeout(() => db.saveUserData(user.email, userData), 800);
+    return () => clearTimeout(t);
+  }, [userData, user]);
+
+  /* Same dispatch the UI always used, plus a mirrored row in the
+     Supabase events table when signed in (fire-and-forget). */
+  const dispatchTracked = React.useCallback((action) => {
+    dispatch(action);
+    const u = userRef.current;
+    if (u && (action.type === "VIDEO_WATCHED" || action.type === "LIKE_TOGGLED" || action.type === "SAVE_TOGGLED" || action.type === "QUIZ_COMPLETE")) {
+      db.logEvent(u.email, action.type, action.result || { storyId: action.storyId || (action.story && action.story.id) });
+    }
+  }, []);
 
   /* lock body scroll while the player is open */
   React.useEffect(() => {
@@ -2653,7 +2873,7 @@ function App() {
   const saved = userData.engagement.savedIds;
   const toggleSave = (story) => {
     const has = saved.includes(story.id);
-    dispatch({ type: "SAVE_TOGGLED", storyId: story.id });
+    dispatchTracked({ type: "SAVE_TOGGLED", storyId: story.id });
     toast(has ? "Removed from Saved" : "Saved to your stories", "bookmark");
     setCardMenu(null);
   };
@@ -2665,7 +2885,7 @@ function App() {
   /* Google sign-in — receives a real decoded GIS profile, or a demo
      account when GIS is unavailable on this origin. Same shape both
      ways, so nothing downstream cares which path fired. */
-  const onGooglePick = (acct) => {
+  const onGooglePick = async (acct) => {
     if (!acct) return;
     setGoogleOpen(false);
     const u = {
@@ -2676,11 +2896,17 @@ function App() {
     };
     setUser(u);
     emailService.captureEmail(acct.email, acct.name, "google_signin"); // 🔌 Mailchimp/Resend
+    /* 🔌 SUPABASE: pull this account's persisted state first, then run
+       the LOGIN streak logic on top of it. Local-only if unconfigured. */
+    const saved = await db.loadUserData(acct.email);
+    if (saved) dispatch({ type: "HYDRATE", data: saved });
     dispatch({ type: "LOGIN" });
+    db.logEvent(acct.email, "LOGIN", { at: new Date().toISOString() });
     toast("Signed in as " + acct.name.split(" ")[0], "check");
   };
   const signOut = () => {
     googleAuth.signOut(); // stop One Tap from silently re-selecting
+    dispatch({ type: "RESET" }); // account data lives server-side
     setUser(null); setMenu(null); toast("Signed out", "person");
   };
 
@@ -2706,9 +2932,9 @@ function App() {
       <main className={mainCls}>
         {view === "home" && (
           <HomeView category={category} setCategory={setCategory} fresh={fresh}
-            openPlayer={openPlayer} onCardMenu={onCardMenu} />
+            feedVersion={newsVersion} openPlayer={openPlayer} onCardMenu={onCardMenu} />
         )}
-        {view === "trending" && <TrendingView openPlayer={openPlayer} onCardMenu={onCardMenu} />}
+        {view === "trending" && <TrendingView feedVersion={newsVersion} openPlayer={openPlayer} onCardMenu={onCardMenu} />}
         {view === "saved" && (
           <SavedView savedIds={saved} openPlayer={openPlayer} onCardMenu={onCardMenu} goHome={() => goNav("home")} />
         )}
@@ -2727,7 +2953,7 @@ function App() {
           onClose={() => setPlayer(null)}
           user={user}
           userData={userData}
-          dispatch={dispatch}
+          dispatch={dispatchTracked}
           toast={toast}
         />
       )}
