@@ -58,3 +58,35 @@ news30/
     ├── main.jsx        React mount
     └── App.jsx         The entire app (UI, data, services, styles)
 ```
+
+## Live data (NewsAPI + Supabase)
+
+Both integrations follow the same rule as Google OAuth: **configured → live, unconfigured or failing → sample/local fallback.** The app never breaks on a missing key.
+
+| Env variable | Enables |
+| --- | --- |
+| `VITE_NEWSAPI_KEY` | Real top headlines (Geopolitics ← general, Finance ← business, Sports ← sports) mapped onto the app's story shape |
+| `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` | Persistent quiz results, login streaks, likes, saves and video engagement per Google account |
+
+**NewsAPI caveat:** the free Developer tier only permits browser requests from `localhost`. On your deployed domain the request will fail (the app quietly falls back to samples) until you either upgrade the plan or proxy the call through a serverless function — the fetch lives in `newsService.load()`.
+
+**Supabase setup:** run this once in Supabase → SQL editor:
+
+```sql
+create table if not exists user_state (
+  user_email text primary key,
+  data jsonb not null,
+  updated_at timestamptz default now()
+);
+create table if not exists events (
+  id bigint generated always as identity primary key,
+  user_email text,
+  event text not null,
+  payload jsonb,
+  at timestamptz default now()
+);
+```
+
+How persistence works: on Google sign-in the app loads `user_state` for that email and hydrates the local store, then recomputes the login streak; every subsequent change is upserted back (debounced 800 ms), and each engagement action also appends to `events`. Guests stay local-only by design.
+
+**Security note (pre-alpha):** with only the anon key and open tables, anyone could write rows. Fine for testing — before launch, move to Supabase Auth (verify the Google ID token server-side) and add per-user RLS policies.
