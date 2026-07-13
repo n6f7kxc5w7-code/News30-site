@@ -3,7 +3,7 @@
    Single-file React app · YouTube-parity layout · Desktop + iPhone
 
    ── CONNECTION POINT INDEX (search for "🔌") ─────────────────────────
-   🔌 AI API        → CONFIG.AI + callClaude()        (Ask AI, Summary chat, Simplify)
+   🔌 AI API        → CONFIG.AI + callAI() · Gemini   (Ask AI, Summary chat, Simplify)
    🔌 GOOGLE OAUTH  → CONFIG.GOOGLE_OAUTH + GoogleModal sign-in flow
    🔌 EMAIL SERVICE → CONFIG.EMAIL + emailService     (Mailchimp / Resend)
    🔌 NEWS API      → CONFIG.NEWS_API + data layer    (NewsAPI-shaped objects)
@@ -26,14 +26,16 @@ const env = (key) =>
 
 const CONFIG = {
   AI: {
-    // 🔌 AI API CONNECTION POINT ─────────────────────────────────────
-    // Inside the Claude.ai artifact preview this endpoint works with NO
-    // key (handled by the environment). For an external deployment set
-    // VITE_ANTHROPIC_API_KEY, and (recommended) proxy the call through
-    // your own backend so the key is never shipped to the browser.
-    ENDPOINT: "https://api.anthropic.com/v1/messages",
-    MODEL: "claude-sonnet-4-6",
-    API_KEY: env("VITE_ANTHROPIC_API_KEY"),
+    // 🔌 AI API — Google Gemini ────────────────────────────────────
+    // Generous free tier. Create a key at aistudio.google.com and set
+    // VITE_GEMINI_API_KEY. Without it, every AI feature serves the
+    // labelled sample responses instead — the UI never breaks.
+    // Tip: VITE_ vars ship in the bundle, so add "Website restrictions"
+    // to the key (AI Studio / Cloud console) limiting it to your
+    // domains — and proxy through a backend before a public launch.
+    ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models",
+    MODEL: "gemini-2.0-flash",
+    API_KEY: env("VITE_GEMINI_API_KEY"),
   },
   GOOGLE_OAUTH: {
     // 🔌 GOOGLE OAUTH — LIVE ─────────────────────────────────────────
@@ -744,48 +746,42 @@ function userDataReducer(state, action) {
   }
 }
 
-/* ── AI service ─────────────────────────────────────────────────────
-   🔌 AI API CONNECTION POINT
-   Inside the Claude.ai preview, this fetch works with no key. For an
-   external deploy, set CONFIG.AI.API_KEY (ideally proxied through
-   your backend). Every AI feature routes through callClaude(), and
-   every call has a graceful sample-response fallback so the UI never
-   breaks without a connection.                                       */
+/* ── AI service — Google Gemini ─────────────────────────────────────
+   🔌 AI API CONNECTION POINT. All three AI features (Ask AI, Summary
+   chat, Simplify) route through callAI() below — Gemini 2.0 Flash,
+   with Google Search grounding on news questions. Key missing or the
+   request fails → graceful fallback to the labelled sample responses
+   in mockAI, so the UI never breaks without a connection.            */
 
-async function callClaude({ system, messages, useWebSearch = false }) {
-  const headers = { "Content-Type": "application/json" };
-  if (CONFIG.AI.API_KEY) {
-    headers["x-api-key"] = CONFIG.AI.API_KEY;
-    headers["anthropic-version"] = "2023-06-01";
-    // Required for browser→API calls. The header name is a deliberate
-    // warning: fine for testing, but proxy through a backend for launch
-    // so the key never ships to users.
-    headers["anthropic-dangerous-direct-browser-access"] = "true";
-  }
-  const body = { model: CONFIG.AI.MODEL, max_tokens: 1000, system, messages };
-  if (useWebSearch) body.tools = [{ type: "web_search_20250305", name: "web_search" }];
-  const res = await fetch(CONFIG.AI.ENDPOINT, {
+async function callAI({ system, messages, useWebSearch = false }) {
+  if (!CONFIG.AI.API_KEY) throw new Error("No AI key configured"); // → sample fallback
+  const body = {
+    contents: messages,
+    systemInstruction: { parts: [{ text: system }] },
+    generationConfig: { maxOutputTokens: 1000 },
+  };
+  if (useWebSearch) body.tools = [{ google_search: {} }]; // Gemini search grounding
+  const res = await fetch(CONFIG.AI.ENDPOINT + "/" + CONFIG.AI.MODEL + ":generateContent", {
     method: "POST",
-    headers,
+    headers: { "Content-Type": "application/json", "x-goog-api-key": CONFIG.AI.API_KEY },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error("AI request failed: " + res.status);
   const data = await res.json();
-  const text = (data.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("\n")
-    .trim();
+  const cand = data.candidates && data.candidates[0];
+  const parts = (cand && cand.content && cand.content.parts) || [];
+  const text = parts.map((pt) => pt.text || "").join("").trim();
   if (!text) throw new Error("Empty AI response");
   return text;
 }
 
+/* Gemini chat history uses role "model" (not "assistant") + parts[]. */
 const toApiHistory = (history) =>
   history
     .filter((m) => !m.pending)
-    .map((m) => ({ role: m.role === "ai" ? "assistant" : "user", content: m.text }));
+    .map((m) => ({ role: m.role === "ai" ? "model" : "user", parts: [{ text: m.text }] }));
 
-const sampleNote = "\n\n— Sample response. Live answers switch on automatically inside the Claude preview, or add your own key at CONFIG.AI for deployment.";
+const sampleNote = "\n\n— Sample response. Add VITE_GEMINI_API_KEY to switch on live AI answers.";
 
 const mockAI = {
   news(question) {
@@ -804,12 +800,12 @@ const mockAI = {
 const aiService = {
   async askNews(question, history = []) {
     try {
-      return await callClaude({
+      return await callAI({
         system:
           "You are the AI assistant inside News30, a short-form news platform covering geopolitics, finance and sports. Today is " +
           fullDate(Date.now()) +
           ". Use web search whenever the question needs current information. Answer in under 130 words: plain text, short paragraphs or dash bullets, no markdown headings. Be direct and factual; note uncertainty where it exists.",
-        messages: [...toApiHistory(history), { role: "user", content: question }],
+        messages: [...toApiHistory(history), { role: "user", parts: [{ text: question }] }],
         useWebSearch: true,
       });
     } catch (e) {
@@ -818,7 +814,7 @@ const aiService = {
   },
   async askStory(story, question, history = []) {
     try {
-      return await callClaude({
+      return await callAI({
         system:
           "You are News30's story assistant. The user is asking about this specific story — Headline: \"" +
           story.headline +
@@ -826,7 +822,7 @@ const aiService = {
           ". Published: " + fullDate(story.publishedAt) + " (" + timeAgo(story.publishedAt) +
           "). Fact-check status: " + FACT[story.fact].label +
           ". Answer questions about this story and its wider context in under 110 words, plain text. If something isn't knowable from the story or general knowledge, say so briefly.",
-        messages: [...toApiHistory(history), { role: "user", content: question }],
+        messages: [...toApiHistory(history), { role: "user", parts: [{ text: question }] }],
       });
     } catch (e) {
       return mockAI.story(story, question);
@@ -834,10 +830,10 @@ const aiService = {
   },
   async simplify(text) {
     try {
-      return await callClaude({
+      return await callAI({
         system:
           "Rewrite the user's article in plain English that a 14-year-old would follow. Keep every fact accurate, cut jargon, maximum 130 words, no intro or outro — output only the rewritten text.",
-        messages: [{ role: "user", content: text }],
+        messages: [{ role: "user", parts: [{ text: text }] }],
       });
     } catch (e) {
       return mockAI.simplify(text);
@@ -2846,7 +2842,7 @@ function App() {
     else setSbFull((f) => !f);
   };
 
-  /* Ask AI (header submit + Ask AI page). 🔌 aiService.askNews → Claude */
+  /* Ask AI (header submit + Ask AI page). 🔌 aiService.askNews → Gemini */
   const runAsk = async (q) => {
     setView("askai"); setPlayer(null);
     const next = [...askThread, { role: "user", text: q }];
