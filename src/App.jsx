@@ -679,7 +679,7 @@ const googleAuth = {
       this._loader = new Promise((resolve, reject) => {
         if (window.google && window.google.accounts) return resolve();
         const s = document.createElement("script");
-        s.src = "https://accounts.google.com/gsi/client";
+        s.src = "https://accounts.google.com/gsi/client?hl=en"; // hl pins UI language (News30 is English-first)
         s.async = true;
         s.defer = true;
         s.onload = () => resolve();
@@ -714,6 +714,7 @@ const googleAuth = {
     window.google.accounts.id.renderButton(el, {
       theme: "outline", size: "large", shape: "pill",
       text: "continue_with", logo_alignment: "left", width: 300,
+      locale: "en", // button label in English regardless of browser language
     });
   },
   prompt() {
