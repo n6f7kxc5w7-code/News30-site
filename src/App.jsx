@@ -843,7 +843,7 @@ const aiService = {
         useWebSearch: true,
       });
     } catch (e) {
-      return mockAI.news(question);
+      return "⚠️ " + (e?.message || String(e));
     }
   },
   async askStory(story, question, history = []) {
@@ -859,7 +859,7 @@ const aiService = {
         messages: [...toApiHistory(history), { role: "user", parts: [{ text: question }] }],
       });
     } catch (e) {
-      return mockAI.story(story, question);
+      return "⚠️ " + (e?.message || String(e));
     }
   },
   async simplify(text) {
@@ -870,7 +870,7 @@ const aiService = {
         messages: [{ role: "user", parts: [{ text: text }] }],
       });
     } catch (e) {
-      return mockAI.simplify(text);
+      return "⚠️ " + (e?.message || String(e));
     }
   },
 };
