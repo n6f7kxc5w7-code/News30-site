@@ -34,7 +34,7 @@ const CONFIG = {
     // to the key (AI Studio / Cloud console) limiting it to your
     // domains — and proxy through a backend before a public launch.
     ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models",
-    MODEL: "gemini-2.0-flash",
+    MODEL: "gemini-2.5-flash",
     API_KEY: env("VITE_GEMINI_API_KEY"),
   },
   GOOGLE_OAUTH: {
