@@ -55,16 +55,16 @@ const CONFIG = {
     AUDIENCE_ID: env("VITE_EMAIL_AUDIENCE_ID"),
   },
   NEWS_API: {
-    // 🔌 NEWS API — LIVE ─────────────────────────────────────────────
-    // With VITE_NEWSAPI_KEY set, the feed pulls real top headlines and
-    // maps them onto the app's story shape (see newsService below).
-    // Without it — or if the request fails — the curated sample
-    // stories load instead, so the app never breaks.
-    // NOTE: newsapi.org's free Developer tier only allows browser
-    // requests from localhost; on a deployed domain use a paid plan or
-    // proxy this call through a serverless function.
-    ENDPOINT: "https://newsapi.org/v2/top-headlines",
-    API_KEY: env("VITE_NEWSAPI_KEY"),
+    // 🔌 NEWS API — LIVE via server proxy ─────────────────────────────
+    // The real NewsAPI key lives server-side only, in the NEWSAPI_KEY
+    // env var (no VITE_ prefix — never shipped to the browser) read by
+    // /api/news.js, a small Vercel serverless function. The browser
+    // calls that proxy instead of newsapi.org directly. This sidesteps
+    // NewsAPI's free-tier restriction (browser calls are only allowed
+    // from localhost, not a deployed domain — see /api/news.js) since
+    // server-to-server calls aren't subject to that CORS rule, and it
+    // keeps the key out of the client bundle entirely.
+    ENDPOINT: "/api/news",
   },
   DATABASE: {
     // 🔌 DATABASE — LIVE (Supabase) ──────────────────────────────────
@@ -458,11 +458,12 @@ function makeArchiveStory(category, idx) {
 }
 
 /* ── LIVE NEWS (NewsAPI) ────────────────────────────────────────────
-   🔌 With VITE_NEWSAPI_KEY set, newsService.load() pulls real top
+   🔌 Via the /api/news server proxy, newsService.load() pulls real top
    headlines per category and maps every article onto the exact story
    shape the whole UI already consumes — cards, player, panels, quizzes
    and deep links all work unchanged. Falls back to the curated sample
-   stories whenever the key is missing or a request fails.            */
+   stories whenever the proxy errors (missing server key, rate limit,
+   network failure) or returns no articles.                            */
 
 const NEWS_CATEGORY_MAP = { geopolitics: "general", finance: "business", sports: "sports" };
 const LIVE_KICKERS = {
@@ -508,18 +509,14 @@ function mapArticle(a, category, idx) {
 }
 
 const newsService = {
-  enabled() { return !!CONFIG.NEWS_API.API_KEY; },
   isLive() { return LIVE.ready; },
   async load() {
-    if (!this.enabled()) return false;
     try {
       const cats = Object.keys(NEWS_CATEGORY_MAP);
       const results = await Promise.all(cats.map(async (cat) => {
-        const u = CONFIG.NEWS_API.ENDPOINT +
-          "?category=" + NEWS_CATEGORY_MAP[cat] +
-          "&language=en&pageSize=30&apiKey=" + CONFIG.NEWS_API.API_KEY;
+        const u = CONFIG.NEWS_API.ENDPOINT + "?category=" + NEWS_CATEGORY_MAP[cat];
         const r = await fetch(u);
-        if (!r.ok) throw new Error("NewsAPI " + r.status);
+        if (!r.ok) throw new Error("NewsAPI proxy failed: " + r.status);
         const j = await r.json();
         return (j.articles || [])
           .filter((a) => a.title && a.title !== "[Removed]" && a.url)
@@ -795,9 +792,9 @@ async function callAI({ system, messages, useWebSearch = false }) {
     generationConfig: { maxOutputTokens: 1000 },
   };
   if (useWebSearch) body.tools = [{ google_search: {} }]; // Gemini search grounding
-  const res = await fetch(CONFIG.AI.ENDPOINT + "/" + CONFIG.AI.MODEL + ":generateContent", {
+  const res = await fetch(CONFIG.AI.ENDPOINT + "/" + CONFIG.AI.MODEL + ":generateContent?key=" + encodeURIComponent(CONFIG.AI.API_KEY), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": CONFIG.AI.API_KEY },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error("AI request failed: " + res.status);
@@ -2731,9 +2728,9 @@ function App() {
     return () => { document.head.removeChild(style); document.title = prevTitle; };
   }, []);
 
-  /* 🔌 LIVE NEWS: pull real headlines on mount when VITE_NEWSAPI_KEY is
-     set. `newsVersion` bumps once loaded so the feed re-renders with
-     real stories; on failure everything stays on the curated samples. */
+  /* 🔌 LIVE NEWS: pull real headlines on mount via the /api/news proxy.
+     `newsVersion` bumps once loaded so the feed re-renders with real
+     stories; on failure everything stays on the curated samples. */
   const [newsVersion, setNewsVersion] = React.useState(0);
   React.useEffect(() => {
     newsService.load().then((ok) => {
