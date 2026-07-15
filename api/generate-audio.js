@@ -77,7 +77,7 @@ export default async function handler(req, res) {
       headers: {
         Authorization: "Bearer " + fishKey,
         "Content-Type": "application/json",
-        model: "s2-pro",
+        model: "s2.1-pro-free", // 🔌 Free under fair use through end of July 2026 — switch back to "s2-pro" before real launch (no uptime/latency guarantee on the free tier).
       },
       body: JSON.stringify({
         text: script,
