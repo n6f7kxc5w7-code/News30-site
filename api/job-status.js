@@ -7,6 +7,14 @@
 import { createClient } from "@supabase/supabase-js";
 
 export default async function handler(req, res) {
+  // CORS: allows this endpoint to be called from a different origin
+  // (needed for the pipeline test harness; harmless for the real app
+  // too, since it calls its own domain anyway).
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") { res.status(200).end(); return; }
+
   if (req.method !== "GET") {
     res.status(405).json({ error: "Use GET" });
     return;
