@@ -797,7 +797,16 @@ async function callAI({ system, messages, useWebSearch = false }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("AI request failed: " + res.status);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const errJson = await res.json();
+      detail = (errJson.error && errJson.error.message) || JSON.stringify(errJson);
+    } catch (e2) {
+      try { detail = await res.text(); } catch (e3) { /* ignore */ }
+    }
+    throw new Error("AI request failed: " + res.status + " — " + detail);
+  }
   const data = await res.json();
   const cand = data.candidates && data.candidates[0];
   const parts = (cand && cand.content && cand.content.parts) || [];
