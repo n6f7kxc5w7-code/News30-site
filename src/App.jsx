@@ -35,7 +35,7 @@ const CONFIG = {
     // to the key (AI Studio / Cloud console) limiting it to your
     // domains — and proxy through a backend before a public launch.
     ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models",
-    MODEL: "gemini-3.5-flash",
+    MODEL: "gemini-2.5-flash",
     API_KEY: env("VITE_GEMINI_API_KEY"),
   },
   GOOGLE_OAUTH: {
@@ -835,6 +835,9 @@ const mockAI = {
     const first = text.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ");
     return "In plain terms: " + first + sampleNote;
   },
+  script(story) {
+    return "Your news in 30 seconds. " + story.headline + ". " + story.source + " reports this " + timeAgo(story.publishedAt) + ". More on this developing story as it unfolds." + sampleNote;
+  },
 };
 
 const aiService = {
@@ -877,6 +880,32 @@ const aiService = {
       });
     } catch (e) {
       return "⚠️ " + (e?.message || String(e));
+    }
+  },
+  /* 🔌 VIDEO SCRIPT GENERATOR — feeds the auto-video pipeline (Gemini
+     script → Fish Audio voice → Shotstack/JSON2Video assembly). Output
+     is spoken-word text only: no markdown, no stage directions, ready
+     to hand straight to the TTS step.                                 */
+  async generateScript(story) {
+    try {
+      return await callAI({
+        system:
+          "You are News30's video script writer. Write a fast-paced, punchy 30-second spoken video script for this story. Rules: " +
+          "Open with exactly \"Your news in 30 seconds.\" then immediately state the single most important fact — no throat-clearing, no \"today we're looking at,\" get straight to what happened. " +
+          "Short sentences, one idea each, cut every word that isn't load-bearing. " +
+          "Include 2-3 concrete specifics (numbers, names, dates) from the story — vague summaries don't hold attention. " +
+          "End with a punchy final line stating the stakes or teasing what happens next — never trail off. " +
+          "Target 65-75 words total (roughly 30 seconds at natural speaking pace). " +
+          "Plain text only, no markdown, no stage directions, nothing but the words to be spoken aloud.\n\n" +
+          "Story headline: \"" + story.headline + "\"\n" +
+          "Source: " + story.source + " (" + BIAS[story.bias].label + ")\n" +
+          "Category: " + catLabel(story.category) + "\n" +
+          "Published: " + fullDate(story.publishedAt) + " (" + timeAgo(story.publishedAt) + ")\n" +
+          "Fact-check status: " + FACT[story.fact].label,
+        messages: [{ role: "user", parts: [{ text: "Write the script now." }] }],
+      });
+    } catch (e) {
+      return mockAI.script(story);
     }
   },
 };
