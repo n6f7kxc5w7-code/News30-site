@@ -1,31 +1,50 @@
 // /api/generate-video.js
-// 🔌 STEP 3 OF THE VIDEO PIPELINE — the final assembly step.
-// Takes a job that already has narration audio (from /api/generate-audio.js),
-// fetches relevant real images from Pexels, builds a Shotstack timeline
-// (audio + a sequence of images with a gentle Ken Burns zoom), and submits
-// it to Shotstack's render queue.
+// 🔌 STEP 3 OF THE VIDEO PIPELINE — FFmpeg version (free, self-hosted,
+// replaces Shotstack). Downloads real Pexels images + the Fish Audio
+// narration into /tmp, uses FFmpeg (via ffmpeg-static, a bundled free
+// binary — no paid API) to assemble a 1080x1920 video with a gentle
+// Ken Burns zoom on each image and BURNED-IN captions generated from
+// the script itself, muxes in the narration audio, then uploads the
+// finished MP4 to Supabase Storage.
 //
-// Rendering is NOT instant — Shotstack renders in the background and
-// calls our webhook (/api/video-webhook.js) when it's done. So this
-// function only *starts* the render; it doesn't wait for the finished
-// video. The video_jobs row moves to status "rendering" here, and the
-// webhook moves it to "done" (or "failed") later.
+// ⚠️ HONEST FLAG: running FFmpeg inside a Vercel serverless function is
+// a known rough edge — several developers report it working locally
+// then failing in production with "binary not found," or hitting
+// function size/time limits. This is written as carefully as
+// reasonably possible, but if it fails on first deploy, the error
+// message will tell us which of these it is, and there are fallbacks
+// (see comments below) rather than starting over from scratch.
 //
 // Required Vercel env vars (server-only, no "VITE_" prefix):
-//   SHOTSTACK_API_KEY
 //   PEXELS_API_KEY
 //   SUPABASE_SERVICE_ROLE_KEY   (already added for generate-audio.js)
-// Reuses VITE_SUPABASE_URL (safe — it's just the project URL).
+// Reuses VITE_SUPABASE_URL. SHOTSTACK_API_KEY is no longer needed —
+// safe to remove once this is confirmed working.
 //
-// IMPORTANT: update PUBLIC_SITE_URL below to your real deployed domain
-// once you know it's stable — Shotstack needs a real public URL to
-// call back to when the render finishes.
+// Because FFmpeg renders synchronously inside this one function call
+// (unlike Shotstack's async webhook), this function does the ENTIRE
+// job in one request: fetch images -> download -> render -> upload ->
+// mark the job "done" -> return. If the video_jobs row is still stuck
+// on "rendering" a while after this call returns, it means the
+// function hit Vercel's time limit before finishing (see maxDuration
+// in vercel.json) — the fix there is fewer/shorter images, not more
+// code here.
 
 import { createClient } from "@supabase/supabase-js";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import fs from "fs/promises";
+import path from "path";
+import os from "os";
+import ffmpegPath from "ffmpeg-static";
 
-const PUBLIC_SITE_URL = "https://news30.live";
+const execFileAsync = promisify(execFile);
+
 const VIDEO_DURATION_SECONDS = 30;
 const IMAGE_COUNT = 5; // 30s / 5 = 6s per image
+const WIDTH = 1080;
+const HEIGHT = 1920;
+const FPS = 25;
 
 async function fetchPexelsImages(query, count, apiKey) {
   const url =
@@ -40,36 +59,81 @@ async function fetchPexelsImages(query, count, apiKey) {
 
   const photos = (data.photos || []).map((p) => p.src.large2x || p.src.large || p.src.original);
   if (photos.length === 0) throw new Error("Pexels returned no images for: " + query);
-
-  // Pad by repeating if Pexels gave us fewer than requested (rare, but keeps timing simple).
   while (photos.length < count) photos.push(photos[photos.length % photos.length || 0]);
   return photos.slice(0, count);
 }
 
-function buildTimeline(audioUrl, images) {
-  const clipLength = VIDEO_DURATION_SECONDS / images.length;
+async function downloadToFile(url, destPath) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Failed to download " + url + ": " + res.status);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  await fs.writeFile(destPath, buffer);
+}
 
-  const imageClips = images.map((src, i) => ({
-    asset: { type: "image", src },
-    start: i * clipLength,
-    length: clipLength,
-    effect: i % 2 === 0 ? "zoomIn" : "zoomOut", // gentle Ken Burns, alternating for variety
-    transition: { in: "fade", out: "fade" },
+// Splits the script into short caption chunks (3-5 words each) and
+// spreads them evenly across the video's duration, proportional to
+// word count. No transcription/timing API needed — this is an
+// estimate, same assumption already baked into the script prompt
+// (65-75 words ≈ 30 seconds of natural speech).
+function buildCaptionChunks(script, totalSeconds) {
+  const words = script.trim().split(/\s+/);
+  const chunkSize = 4;
+  const chunks = [];
+  for (let i = 0; i < words.length; i += chunkSize) {
+    chunks.push(words.slice(i, i + chunkSize).join(" "));
+  }
+  const perChunk = totalSeconds / chunks.length;
+  return chunks.map((text, i) => ({
+    text,
+    start: (i * perChunk).toFixed(2),
+    end: ((i + 1) * perChunk).toFixed(2),
   }));
+}
 
-  return {
-    background: "#000000",
-    tracks: [
-      { clips: [{ asset: { type: "audio", src: audioUrl }, start: 0, length: VIDEO_DURATION_SECONDS }] },
-      { clips: imageClips },
-    ],
-  };
+// Escapes text for safe use inside an FFmpeg drawtext filter string.
+function escapeDrawtext(text) {
+  return text.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\u2019");
+}
+
+function buildFilterComplex(imagePaths, captionChunks) {
+  const perImageSeconds = VIDEO_DURATION_SECONDS / imagePaths.length;
+  const framesPerImage = Math.round(perImageSeconds * FPS);
+  const parts = [];
+  const zoomLabels = [];
+
+  imagePaths.forEach((_, i) => {
+    // Scale to fill the vertical frame, crop to exact size, then a
+    // slow zoom (Ken Burns) over the segment's duration.
+    parts.push(
+      "[" + i + ":v]scale=" + WIDTH + ":" + HEIGHT + ":force_original_aspect_ratio=increase," +
+      "crop=" + WIDTH + ":" + HEIGHT + "," +
+      "zoompan=z='min(zoom+0.0015,1.2)':d=" + framesPerImage + ":s=" + WIDTH + "x" + HEIGHT + ":fps=" + FPS +
+      "[v" + i + "]"
+    );
+    zoomLabels.push("[v" + i + "]");
+  });
+
+  // Concatenate all the zoomed image segments into one continuous stream.
+  parts.push(zoomLabels.join("") + "concat=n=" + imagePaths.length + ":v=1:a=0[vconcat]");
+
+  // Chain one drawtext filter per caption chunk, each only visible
+  // during its own time window via the `enable` expression.
+  let lastLabel = "vconcat";
+  captionChunks.forEach((c, i) => {
+    const outLabel = "cap" + i;
+    parts.push(
+      "[" + lastLabel + "]drawtext=text='" + escapeDrawtext(c.text) + "':" +
+      "fontcolor=white:fontsize=64:font=Arial:box=1:boxcolor=black@0.55:boxborderw=20:" +
+      "x=(w-text_w)/2:y=h-320:enable='between(t," + c.start + "," + c.end + ")'" +
+      "[" + outLabel + "]"
+    );
+    lastLabel = outLabel;
+  });
+
+  return { filterComplex: parts.join(";"), finalLabel: lastLabel };
 }
 
 export default async function handler(req, res) {
-  // CORS: allows this endpoint to be called from a different origin
-  // (needed for the pipeline test harness; harmless for the real app
-  // too, since it calls its own domain anyway).
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -86,33 +150,22 @@ export default async function handler(req, res) {
     return;
   }
 
-  const shotstackKey = process.env.SHOTSTACK_API_KEY;
   const pexelsKey = process.env.PEXELS_API_KEY;
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!shotstackKey || !pexelsKey || !supabaseUrl || !serviceKey) {
+  if (!pexelsKey || !supabaseUrl || !serviceKey) {
     res.status(500).json({
       error: "Missing server config",
-      missing: {
-        SHOTSTACK_API_KEY: !shotstackKey,
-        PEXELS_API_KEY: !pexelsKey,
-        VITE_SUPABASE_URL: !supabaseUrl,
-        SUPABASE_SERVICE_ROLE_KEY: !serviceKey,
-      },
+      missing: { PEXELS_API_KEY: !pexelsKey, VITE_SUPABASE_URL: !supabaseUrl, SUPABASE_SERVICE_ROLE_KEY: !serviceKey },
     });
     return;
   }
 
   const supabase = createClient(supabaseUrl, serviceKey);
 
-  // Load the job — it must already have audio_url from the previous step.
   const { data: job, error: fetchErr } = await supabase
-    .from("video_jobs")
-    .select("*")
-    .eq("id", jobId)
-    .single();
-
+    .from("video_jobs").select("*").eq("id", jobId).single();
   if (fetchErr || !job) {
     res.status(404).json({ error: "Job not found: " + (fetchErr ? fetchErr.message : jobId) });
     return;
@@ -122,47 +175,73 @@ export default async function handler(req, res) {
     return;
   }
 
+  const workDir = path.join(os.tmpdir(), "news30-" + jobId);
+  await fs.mkdir(workDir, { recursive: true });
+
   try {
-    // 1) Real images matched to the story topic (category gives Pexels
-    //    better search context than the headline alone would).
+    await supabase.from("video_jobs").update({ status: "rendering", updated_at: new Date().toISOString() }).eq("id", jobId);
+
+    // 1) Real images matched to the story topic.
     const searchQuery = (category ? category + " " : "") + headline;
-    const images = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey);
+    const imageUrls = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey);
+    const imagePaths = await Promise.all(imageUrls.map(async (url, i) => {
+      const dest = path.join(workDir, "img" + i + ".jpg");
+      await downloadToFile(url, dest);
+      return dest;
+    }));
 
-    // 2) Build and submit the Shotstack render.
-    const timeline = buildTimeline(job.audio_url, images);
-    const renderBody = {
-      timeline,
-      output: { format: "mp4", size: { width: 1080, height: 1920 } }, // vertical, matches News30's player
-      callback: PUBLIC_SITE_URL + "/api/video-webhook",
-    };
+    // 2) Narration audio (already generated in the previous step).
+    const audioPath = path.join(workDir, "audio.mp3");
+    await downloadToFile(job.audio_url, audioPath);
 
-    const shotstackRes = await fetch("https://api.shotstack.io/stage/render", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": shotstackKey },
-      body: JSON.stringify(renderBody),
-    });
+    // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in captions.
+    const captionChunks = buildCaptionChunks(job.script || headline, VIDEO_DURATION_SECONDS);
+    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, captionChunks);
 
-    const shotstackData = await shotstackRes.json();
-    if (!shotstackRes.ok || !shotstackData.success) {
-      throw new Error("Shotstack render request failed: " + JSON.stringify(shotstackData));
-    }
+    const outputPath = path.join(workDir, "output.mp4");
+    const args = [];
+    imagePaths.forEach((p) => { args.push("-loop", "1", "-t", String(VIDEO_DURATION_SECONDS / imagePaths.length), "-i", p); });
+    args.push("-i", audioPath);
+    args.push(
+      "-filter_complex", filterComplex,
+      "-map", "[" + finalLabel + "]",
+      "-map", imagePaths.length + ":a",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-shortest",
+      "-y", outputPath
+    );
 
-    const renderId = shotstackData.response.id;
+    // Run FFmpeg. If this throws "spawn ENOENT" or similar, ffmpeg-static's
+    // binary didn't get bundled correctly — see the honest flag at the
+    // top of this file for what that means and how to fall back.
+    await execFileAsync(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 50 });
 
-    // 3) Mark the job as rendering — the webhook will flip this to
-    //    "done" (with video_url) or "failed" once Shotstack finishes.
-    await supabase
-      .from("video_jobs")
-      .update({ status: "rendering", shotstack_render_id: renderId, updated_at: new Date().toISOString() })
+    // 4) Upload the finished video to Supabase Storage.
+    const videoBuffer = await fs.readFile(outputPath);
+    const filePath = "video/" + jobId + ".mp4";
+    const { error: uploadErr } = await supabase.storage
+      .from("media")
+      .upload(filePath, videoBuffer, { contentType: "video/mp4", upsert: true });
+    if (uploadErr) throw new Error("Storage upload failed: " + uploadErr.message);
+
+    const { data: publicUrlData } = supabase.storage.from("media").getPublicUrl(filePath);
+    const videoUrl = publicUrlData.publicUrl;
+
+    // 5) Done — no webhook needed, this whole thing just happened synchronously.
+    await supabase.from("video_jobs")
+      .update({ status: "done", video_url: videoUrl, updated_at: new Date().toISOString() })
       .eq("id", jobId);
 
-    res.status(200).json({ jobId, renderId, status: "rendering" });
+    res.status(200).json({ jobId, videoUrl, status: "done" });
   } catch (e) {
-    await supabase
-      .from("video_jobs")
+    await supabase.from("video_jobs")
       .update({ status: "failed", error: String(e), updated_at: new Date().toISOString() })
       .eq("id", jobId);
-
     res.status(500).json({ error: String(e) });
+  } finally {
+    // Clean up /tmp regardless of outcome — Vercel's disk is ephemeral
+    // per-invocation anyway, but tidy exits matter under memory pressure.
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
