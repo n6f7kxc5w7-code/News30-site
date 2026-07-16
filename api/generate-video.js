@@ -90,12 +90,27 @@ function buildCaptionChunks(script, totalSeconds) {
   }));
 }
 
-// Escapes text for safe use inside an FFmpeg drawtext filter string.
-function escapeDrawtext(text) {
-  return text.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\u2019");
+// Formats seconds as an SRT timestamp: HH:MM:SS,mmm
+function srtTimestamp(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = Math.floor(totalSeconds % 60);
+  const ms = Math.round((totalSeconds - Math.floor(totalSeconds)) * 1000);
+  const pad = (n, len) => String(n).padStart(len, "0");
+  return pad(h, 2) + ":" + pad(m, 2) + ":" + pad(s, 2) + "," + pad(ms, 3);
 }
 
-function buildFilterComplex(imagePaths, captionChunks) {
+// Builds a standard .srt file from the caption chunks — this is what
+// gets burned into the video via FFmpeg's `subtitles` filter below.
+function buildSrt(captionChunks) {
+  return captionChunks.map((c, i) =>
+    (i + 1) + "\n" +
+    srtTimestamp(parseFloat(c.start)) + " --> " + srtTimestamp(parseFloat(c.end)) + "\n" +
+    c.text + "\n"
+  ).join("\n");
+}
+
+function buildFilterComplex(imagePaths, srtPath) {
   const perImageSeconds = VIDEO_DURATION_SECONDS / imagePaths.length;
   const framesPerImage = Math.round(perImageSeconds * FPS);
   const parts = [];
@@ -116,22 +131,22 @@ function buildFilterComplex(imagePaths, captionChunks) {
   // Concatenate all the zoomed image segments into one continuous stream.
   parts.push(zoomLabels.join("") + "concat=n=" + imagePaths.length + ":v=1:a=0[vconcat]");
 
-  // Chain one drawtext filter per caption chunk, each only visible
-  // during its own time window via the `enable` expression.
-  let lastLabel = "vconcat";
-  captionChunks.forEach((c, i) => {
-    const outLabel = "cap" + i;
-    parts.push(
-      "[" + lastLabel + "]drawtext=text='" + escapeDrawtext(c.text) + "':" +
-      "fontcolor=white:fontsize=64:font=Arial:box=1:boxcolor=black@0.55:boxborderw=20:" +
-      "x=(w-text_w)/2:y=h-320:enable='between(t," + c.start + "," + c.end + ")'" +
-      "[" + outLabel + "]"
-    );
-    lastLabel = outLabel;
-  });
+  // Burn in captions via libass's `subtitles` filter instead of
+  // `drawtext` — Vercel's bundled static FFmpeg binary doesn't include
+  // drawtext (confirmed: "No such filter: 'drawtext'"), but does
+  // include libass, which is what powers this filter. One filter
+  // instead of one-per-caption-chunk, styled to look like our old
+  // drawtext boxes (white bold text, semi-opaque black background bar,
+  // positioned near the bottom rather than libass's usual bottom-most
+  // default via MarginV).
+  const style =
+    "FontSize=13,Bold=1,PrimaryColour=&H00FFFFFF&,BorderStyle=3," +
+    "BackColour=&H60000000&,Outline=0,MarginV=140,Alignment=2";
+  parts.push("[vconcat]subtitles=" + srtPath + ":force_style='" + style + "'[vout]");
 
-  return { filterComplex: parts.join(";"), finalLabel: lastLabel };
+  return { filterComplex: parts.join(";"), finalLabel: "vout" };
 }
+
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -194,9 +209,12 @@ export default async function handler(req, res) {
     const audioPath = path.join(workDir, "audio.mp3");
     await downloadToFile(job.audio_url, audioPath);
 
-    // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in captions.
+    // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in
+    //    captions via a real .srt file (subtitles filter, not drawtext).
     const captionChunks = buildCaptionChunks(job.script || headline, VIDEO_DURATION_SECONDS);
-    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, captionChunks);
+    const srtPath = path.join(workDir, "captions.srt");
+    await fs.writeFile(srtPath, buildSrt(captionChunks), "utf8");
+    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, srtPath);
 
     const outputPath = path.join(workDir, "output.mp4");
     const args = [];
