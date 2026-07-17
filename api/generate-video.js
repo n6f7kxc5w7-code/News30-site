@@ -303,19 +303,25 @@ export default async function handler(req, res) {
   try {
     await supabase.from("video_jobs").update({ status: "rendering", updated_at: new Date().toISOString() }).eq("id", jobId);
 
-    // 1) Real images matched to the story topic.
-    const stockKeywords = await getStockKeywords(headline, category, geminiKey);
-    const searchQuery = stockKeywords;
-    const imageUrls = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey, category);
-    const imagePaths = await Promise.all(imageUrls.map(async (url, i) => {
-      const dest = path.join(workDir, "img" + i + ".jpg");
-      await downloadToFile(url, dest);
-      return dest;
-    }));
-
-    // 2) Narration audio (already generated in the previous step).
+    // 1) Real images matched to the story topic, AND 2) the narration
+    // audio — these two chains don't depend on each other at all, so
+    // running them at the same time (instead of one-after-another, as
+    // before) cuts real wall-clock time, which matters given Vercel's
+    // 60-second function limit on the free plan.
     const audioPath = path.join(workDir, "audio.mp3");
-    await downloadToFile(job.audio_url, audioPath);
+
+    const [imagePaths] = await Promise.all([
+      (async () => {
+        const stockKeywords = await getStockKeywords(headline, category, geminiKey);
+        const imageUrls = await fetchPexelsImages(stockKeywords, IMAGE_COUNT, pexelsKey, category);
+        return Promise.all(imageUrls.map(async (url, i) => {
+          const dest = path.join(workDir, "img" + i + ".jpg");
+          await downloadToFile(url, dest);
+          return dest;
+        }));
+      })(),
+      downloadToFile(job.audio_url, audioPath),
+    ]);
 
     // 2b) Measure how long the narration ACTUALLY is — this is the fix
     // for captions drifting out of sync. Everything below (caption
