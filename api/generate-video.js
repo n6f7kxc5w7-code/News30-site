@@ -260,7 +260,7 @@ export default async function handler(req, res) {
     const captionChunks = buildCaptionChunks(job.script || headline, VIDEO_DURATION_SECONDS);
     const assPath = path.join(workDir, "captions.ass");
     await fs.writeFile(assPath, buildAss(captionChunks), "utf8");
-    const fontsDir = path.dirname(fileURLToPath(new URL("./fonts/LiberationSans-Bold.ttf", import.meta.url)));
+    const fontsDir = path.dirname(fileURLToPath(new URL("./LiberationSans-Bold.ttf", import.meta.url)));
     const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, assPath, fontsDir);
 
     const outputPath = path.join(workDir, "output.mp4");
