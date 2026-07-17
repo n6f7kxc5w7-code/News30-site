@@ -895,7 +895,7 @@ const aiService = {
           "Short sentences, one idea each, cut every word that isn't load-bearing. " +
           "Include 2-3 concrete specifics (numbers, names, dates) from the story — vague summaries don't hold attention. " +
           "End with a punchy final line stating the stakes or teasing what happens next — never trail off. " +
-          "Target 65-75 words total (roughly 30 seconds at natural speaking pace). " +
+          "Target 52-60 words total (roughly 25 seconds at natural speaking pace — kept slightly under 30 for now while the video render pipeline is on a tighter server time budget). " +
           "Plain text only, no markdown, no stage directions, nothing but the words to be spoken aloud.\n\n" +
           "Story headline: \"" + story.headline + "\"\n" +
           "Source: " + story.source + " (" + BIAS[story.bias].label + ")\n" +
@@ -907,6 +907,56 @@ const aiService = {
     } catch (e) {
       return mockAI.script(story);
     }
+  },
+};
+
+/* ── Video pipeline orchestrator ──────────────────────────────────────
+   🔌 Ties the whole auto-video pipeline together from the client side:
+   Gemini script (aiService.generateScript, already live) → server-side
+   /api/generate-audio (Fish Audio) → server-side /api/generate-video
+   (Pexels images + Shotstack render) → /api/job-status polling until
+   the finished video_url is ready. Each stage reports progress via
+   onProgress so the UI can show what's happening in real time.        */
+const videoService = {
+  async generate(story, onProgress) {
+    const report = (stage) => { if (onProgress) onProgress(stage); };
+
+    report("script");
+    const script = await aiService.generateScript(story);
+    if (script.startsWith("⚠️")) throw new Error(script);
+
+    report("audio");
+    const audioRes = await fetch("/api/generate-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storyId: story.id, script }),
+    });
+    const audioData = await audioRes.json();
+    if (!audioRes.ok) throw new Error(audioData.error || "Audio generation failed");
+
+    report("rendering");
+    const videoRes = await fetch("/api/generate-video", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: audioData.jobId, headline: story.headline, category: story.category }),
+    });
+    const videoData = await videoRes.json();
+    if (!videoRes.ok) throw new Error(videoData.error || "Video render request failed");
+
+    return this.pollUntilDone(audioData.jobId, onProgress);
+  },
+  async pollUntilDone(jobId, onProgress, { intervalMs = 5000, timeoutMs = 240000 } = {}) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const r = await fetch("/api/job-status?jobId=" + jobId);
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "Status check failed");
+      if (data.status === "done") return data;
+      if (data.status === "failed") throw new Error(data.error || "Render failed");
+      if (onProgress) onProgress("rendering");
+      await new Promise((res) => setTimeout(res, intervalMs));
+    }
+    throw new Error("Timed out waiting for the video to finish rendering");
   },
 };
 
@@ -2525,6 +2575,91 @@ function QuizPanel({ story, user, dispatch, onClose }) {
   );
 }
 
+const VIDEO_STAGES = [
+  { key: "script", label: "Writing script" },
+  { key: "audio", label: "Recording narration" },
+  { key: "rendering", label: "Assembling video" },
+];
+
+function VideoGenPanel({ story, onClose }) {
+  const [state, setState] = React.useState("idle"); // idle | script | audio | rendering | done | failed
+  const [videoUrl, setVideoUrl] = React.useState(null);
+  const [errorMsg, setErrorMsg] = React.useState(null);
+
+  React.useEffect(() => {
+    setState("idle"); setVideoUrl(null); setErrorMsg(null);
+  }, [story.id]);
+
+  const start = async () => {
+    setState("script"); setErrorMsg(null);
+    try {
+      const result = await videoService.generate(story, (stage) => setState(stage));
+      setVideoUrl(result.video_url);
+      setState("done");
+    } catch (e) {
+      setErrorMsg(e?.message || String(e));
+      setState("failed");
+    }
+  };
+
+  const stageIndex = VIDEO_STAGES.findIndex((s) => s.key === state);
+
+  return (
+    <SlidePanel title="Generate Video" icon="sparkle" onClose={onClose}>
+      {state === "idle" && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, textAlign: "center", padding: "20px 0" }}>
+          <div className="aiv-glow"><Icon name="sparkle" size={26} /></div>
+          <p className="sum-p" style={{ maxWidth: 280 }}>
+            Turns this story into a real 30-second video — AI script, AI narration, and real footage, assembled automatically.
+          </p>
+          <button className="btn blue" onClick={start}>
+            <Icon name="sparkle" size={16} /> Generate video
+          </button>
+        </div>
+      )}
+
+      {(state === "script" || state === "audio" || state === "rendering") && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "12px 0" }}>
+          {VIDEO_STAGES.map((s, i) => (
+            <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {i < stageIndex ? (
+                <Icon name="checkCircle" size={20} style={{ color: "var(--green)" }} />
+              ) : i === stageIndex ? (
+                <div className="spin" style={{ width: 20, height: 20, margin: 0, borderWidth: 2.5 }} />
+              ) : (
+                <div style={{ width: 20, height: 20, borderRadius: "50%", border: "2px solid #3a3a3a" }} />
+              )}
+              <span style={{ color: i <= stageIndex ? "var(--txt)" : "var(--txt2)", fontSize: 14, fontWeight: i === stageIndex ? 600 : 400 }}>
+                {s.label}
+              </span>
+            </div>
+          ))}
+          <div className="chat-hint" style={{ marginTop: 4 }}>
+            This can take a minute or two — real rendering, not a shortcut.
+          </div>
+        </div>
+      )}
+
+      {state === "done" && videoUrl && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <video controls src={videoUrl} style={{ width: "100%", borderRadius: 12, background: "#000" }} />
+          <button className="btn ghost" onClick={start}>
+            <Icon name="sparkle" size={15} /> Regenerate
+          </button>
+        </div>
+      )}
+
+      {state === "failed" && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, textAlign: "center", padding: "20px 0" }}>
+          <Icon name="alertTriangle" size={28} style={{ color: "var(--red)" }} />
+          <p className="sum-p">{errorMsg}</p>
+          <button className="btn" onClick={start}>Try again</button>
+        </div>
+      )}
+    </SlidePanel>
+  );
+}
+
 /* ═════ 12 · PLAYER — fullscreen vertical story player (Shorts-style) ═ */
 
 function Player({ story, list, index, onNavIndex, onClose, user, userData, dispatch, toast }) {
@@ -2663,6 +2798,13 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
             Quiz
           </div>
           <div className="rail-btn">
+            <button className="ibtn" onClick={() => setPanel(panel === "video" ? null : "video")}
+              style={panel === "video" ? { background: "var(--hover)" } : null} aria-label="Generate video">
+              <Icon name="sparkle" size={23} />
+            </button>
+            Video
+          </div>
+          <div className="rail-btn">
             <button className="ibtn" onClick={doShare} aria-label="Share">
               <Icon name="share" size={23} />
             </button>
@@ -2682,6 +2824,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
 
       {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} />}
       {panel === "quiz" && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
+      {panel === "video" && <VideoGenPanel story={story} onClose={() => setPanel(null)} />}
     </div>
   );
 }
