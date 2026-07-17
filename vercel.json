@@ -3,7 +3,7 @@
   "functions": {
     "api/generate-video.js": {
       "maxDuration": 60,
-      "includeFiles": "node_modules/ffmpeg-static/**"
+      "includeFiles": "{node_modules/ffmpeg-static/**,api/LiberationSans-Bold.ttf}"
     }
   }
 }
