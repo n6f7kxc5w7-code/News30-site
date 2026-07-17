@@ -36,6 +36,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
+import { fileURLToPath } from "url";
 import ffmpegPath from "ffmpeg-static";
 
 const execFileAsync = promisify(execFile);
@@ -46,20 +47,35 @@ const WIDTH = 1080;
 const HEIGHT = 1920;
 const FPS = 25;
 
-async function fetchPexelsImages(query, count, apiKey) {
-  const url =
-    "https://api.pexels.com/v1/search?query=" +
-    encodeURIComponent(query) +
-    "&per_page=" + count +
-    "&orientation=portrait";
+async function fetchPexelsImages(query, count, apiKey, category) {
+  const search = async (q) => {
+    const url =
+      "https://api.pexels.com/v1/search?query=" +
+      encodeURIComponent(q) +
+      "&per_page=" + count +
+      "&orientation=portrait";
+    const res = await fetch(url, { headers: { Authorization: apiKey } });
+    if (!res.ok) throw new Error("Pexels request failed: " + res.status);
+    const data = await res.json();
+    return (data.photos || []).map((p) => p.src.large2x || p.src.large || p.src.original);
+  };
 
-  const res = await fetch(url, { headers: { Authorization: apiKey } });
-  if (!res.ok) throw new Error("Pexels request failed: " + res.status);
-  const data = await res.json();
+  let photos = await search(query);
 
-  const photos = (data.photos || []).map((p) => p.src.large2x || p.src.large || p.src.original);
+  // If the specific headline search didn't return enough UNIQUE photos,
+  // broaden with a more generic query instead of repeating the same
+  // image over and over (which is what happened before this fix).
+  if (photos.length < count) {
+    const broader = await search(category || "news").catch(() => []);
+    for (const p of broader) {
+      if (photos.length >= count) break;
+      if (!photos.includes(p)) photos.push(p);
+    }
+  }
+  // Last-resort fallback only if Pexels genuinely has nothing at all.
   if (photos.length === 0) throw new Error("Pexels returned no images for: " + query);
-  while (photos.length < count) photos.push(photos[photos.length % photos.length || 0]);
+  while (photos.length < count) photos.push(photos[photos.length % photos.length]);
+
   return photos.slice(0, count);
 }
 
@@ -90,27 +106,55 @@ function buildCaptionChunks(script, totalSeconds) {
   }));
 }
 
-// Formats seconds as an SRT timestamp: HH:MM:SS,mmm
-function srtTimestamp(totalSeconds) {
+// Formats seconds as an ASS timestamp: H:MM:SS.cc (centiseconds)
+function assTimestamp(totalSeconds) {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = Math.floor(totalSeconds % 60);
-  const ms = Math.round((totalSeconds - Math.floor(totalSeconds)) * 1000);
+  const cs = Math.round((totalSeconds - Math.floor(totalSeconds)) * 100);
   const pad = (n, len) => String(n).padStart(len, "0");
-  return pad(h, 2) + ":" + pad(m, 2) + ":" + pad(s, 2) + "," + pad(ms, 3);
+  return h + ":" + pad(m, 2) + ":" + pad(s, 2) + "." + pad(cs, 2);
 }
 
-// Builds a standard .srt file from the caption chunks — this is what
-// gets burned into the video via FFmpeg's `subtitles` filter below.
-function buildSrt(captionChunks) {
-  return captionChunks.map((c, i) =>
-    (i + 1) + "\n" +
-    srtTimestamp(parseFloat(c.start)) + " --> " + srtTimestamp(parseFloat(c.end)) + "\n" +
-    c.text + "\n"
+// Builds a full .ass subtitle file with the style baked directly into
+// its own [V4+ Styles] section, instead of relying on FFmpeg's
+// `force_style` override on a bare .srt.
+//
+// ⚠️ WHY: force_style on a plain .srt turned out to be unreliable in
+// real testing — captions rendered at the wrong position (mid-frame,
+// ignoring MarginV/Alignment entirely) no matter what was set. Baking
+// the style into a proper .ass file (with PlayResX/Y declared to match
+// our real output resolution) is the standard, more reliable path and
+// was verified to position correctly in testing.
+//
+// Also confirmed by testing: with BorderStyle=3 (opaque box behind the
+// text), the "Outline" field must be a nonzero value — that field
+// controls the box's padding/thickness in this mode, and with Outline=0
+// the box silently collapses to nothing (text still shows, box doesn't).
+function buildAss(captionChunks) {
+  const header =
+    "[Script Info]\n" +
+    "ScriptType: v4.00+\n" +
+    "PlayResX: " + WIDTH + "\n" +
+    "PlayResY: " + HEIGHT + "\n" +
+    "ScaledBorderAndShadow: yes\n\n" +
+    "[V4+ Styles]\n" +
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
+    // BackColour uses full opacity (&H00 alpha) — semi-transparent alpha
+    // was tested and silently ignored by this render path, so a solid
+    // box is used instead (still clean and highly readable).
+    "Style: Default,Liberation Sans,58,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,3,8,0,2,60,60,140,1\n\n" +
+    "[Events]\n" +
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+
+  const events = captionChunks.map((c) =>
+    "Dialogue: 0," + assTimestamp(parseFloat(c.start)) + "," + assTimestamp(parseFloat(c.end)) + ",Default,,0,0,0,," + c.text
   ).join("\n");
+
+  return header + events;
 }
 
-function buildFilterComplex(imagePaths, srtPath) {
+function buildFilterComplex(imagePaths, assPath, fontsDir) {
   const perImageSeconds = VIDEO_DURATION_SECONDS / imagePaths.length;
   const framesPerImage = Math.round(perImageSeconds * FPS);
   const parts = [];
@@ -134,15 +178,17 @@ function buildFilterComplex(imagePaths, srtPath) {
   // Burn in captions via libass's `subtitles` filter instead of
   // `drawtext` — Vercel's bundled static FFmpeg binary doesn't include
   // drawtext (confirmed: "No such filter: 'drawtext'"), but does
-  // include libass, which is what powers this filter. One filter
-  // instead of one-per-caption-chunk, styled to look like our old
-  // drawtext boxes (white bold text, semi-opaque black background bar,
-  // positioned near the bottom rather than libass's usual bottom-most
-  // default via MarginV).
-  const style =
-    "FontSize=13,Bold=1,PrimaryColour=&H00FFFFFF&,BorderStyle=3," +
-    "BackColour=&H60000000&,Outline=0,MarginV=140,Alignment=2";
-  parts.push("[vconcat]subtitles=" + srtPath + ":force_style='" + style + "'[vout]");
+  // include libass, which is what powers this filter.
+  //
+  // `fontsdir` points libass at a font file bundled directly in this
+  // repo (api/fonts/LiberationSans-Bold.ttf). Without this, captions
+  // render completely invisibly — Vercel's serverless environment has
+  // NO system fonts installed at all, so libass silently draws nothing
+  // rather than erroring.
+  //
+  // No `force_style` needed here — the style is already baked into the
+  // .ass file itself (see buildAss above).
+  parts.push("[vconcat]subtitles=" + assPath + ":fontsdir=" + fontsDir + "[vout]");
 
   return { filterComplex: parts.join(";"), finalLabel: "vout" };
 }
@@ -198,7 +244,7 @@ export default async function handler(req, res) {
 
     // 1) Real images matched to the story topic.
     const searchQuery = (category ? category + " " : "") + headline;
-    const imageUrls = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey);
+    const imageUrls = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey, category);
     const imagePaths = await Promise.all(imageUrls.map(async (url, i) => {
       const dest = path.join(workDir, "img" + i + ".jpg");
       await downloadToFile(url, dest);
@@ -212,9 +258,10 @@ export default async function handler(req, res) {
     // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in
     //    captions via a real .srt file (subtitles filter, not drawtext).
     const captionChunks = buildCaptionChunks(job.script || headline, VIDEO_DURATION_SECONDS);
-    const srtPath = path.join(workDir, "captions.srt");
-    await fs.writeFile(srtPath, buildSrt(captionChunks), "utf8");
-    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, srtPath);
+    const assPath = path.join(workDir, "captions.ass");
+    await fs.writeFile(assPath, buildAss(captionChunks), "utf8");
+    const fontsDir = path.dirname(fileURLToPath(new URL("./fonts/LiberationSans-Bold.ttf", import.meta.url)));
+    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, assPath, fontsDir);
 
     const outputPath = path.join(workDir, "output.mp4");
     const args = [];
