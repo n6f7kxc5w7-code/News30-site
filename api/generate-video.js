@@ -42,47 +42,38 @@ import ffmpegPath from "ffmpeg-static";
 const execFileAsync = promisify(execFile);
 
 const FALLBACK_DURATION_SECONDS = 30; // only used if duration detection somehow fails
-const IMAGE_COUNT = 5; // 30s / 5 = 6s per image
-const WIDTH = 1080;
-const HEIGHT = 1920;
+const IMAGE_COUNT = 5; // testing showed count barely affects render time vs resolution/preset —
+                        // keeping 5 for better pacing/retention (~5s per image, not ~8s)
+const WIDTH = 720;
+const HEIGHT = 1280;
 const FPS = 25;
 
 // Turns a specific news headline into broad, generic keywords a stock
-// photo library can actually match. Pexels doesn't have photos of
-// specific real events ("Iran USA strikes") — searching the literal
-// headline either returns almost nothing (forcing the same-image-
-// repeated fallback) or something thematically unrelated. Asking
-// Gemini for the underlying visual THEME (e.g. "military aircraft",
-// "government building", "flag") instead of the literal event fixes
-// both problems at once, since they were really the same root cause.
-async function getStockKeywords(headline, category, geminiKey) {
-  if (!geminiKey) return category || "news"; // graceful fallback, no hard dependency
-  try {
-    const prompt =
-      "Convert this news headline into 3-4 broad, generic English keywords " +
-      "suitable for searching a GENERIC STOCK PHOTO library (like Pexels or Shutterstock). " +
-      "Focus on visual THEMES and CONCEPTS a stock library would actually have photos of " +
-      "(e.g. 'military aircraft', 'government building', 'stock market', 'courtroom') " +
-      "— NOT specific real people, countries, or named events, since stock libraries don't " +
-      "have those. Output ONLY the comma-separated keywords, nothing else.\n\n" +
-      "Category: " + (category || "general") + "\n" +
-      "Headline: " + headline;
+// photo library can actually match — WITHOUT a network round-trip.
+// Pexels doesn't have photos of specific real events ("Iran USA
+// strikes"), so searching the literal headline either returns almost
+// nothing or something unrelated. This used to ask Gemini to do this
+// conversion, but that added a full API round-trip to every render —
+// real seconds that matter now that we're up against Vercel's 60s
+// function limit. This instant keyword-matching approach trades a
+// little relevance-smarts for guaranteed zero added latency.
+const STOCK_KEYWORD_MAP = [
+  { triggers: ["strike", "military", "war", "troops", "missile", "attack", "conflict"], keywords: "military aircraft flag" },
+  { triggers: ["election", "vote", "parliament", "president", "government", "minister"], keywords: "government building flag" },
+  { triggers: ["market", "stock", "economy", "inflation", "bank", "trade", "profit"], keywords: "stock market finance" },
+  { triggers: ["court", "trial", "lawsuit", "judge", "legal", "sentenced"], keywords: "courtroom justice gavel" },
+  { triggers: ["climate", "weather", "storm", "flood", "heat", "hurricane"], keywords: "weather storm clouds" },
+  { triggers: ["football", "soccer", "match", "goal", "tournament", "championship", "team", "player"], keywords: "stadium sports crowd" },
+  { triggers: ["tech", "ai", "software", "app", "startup", "chip"], keywords: "technology office computer" },
+  { triggers: ["health", "hospital", "disease", "vaccine", "medical"], keywords: "hospital medical healthcare" },
+];
 
-    const res = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + encodeURIComponent(geminiKey),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
-      }
-    );
-    if (!res.ok) return category || "news";
-    const data = await res.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return (text && text.trim()) || category || "news";
-  } catch (e) {
-    return category || "news"; // never let a keyword-extraction hiccup break the whole pipeline
+function getStockKeywords(headline, category) {
+  const lower = (headline || "").toLowerCase();
+  for (const entry of STOCK_KEYWORD_MAP) {
+    if (entry.triggers.some((t) => lower.includes(t))) return entry.keywords;
   }
+  return (category || "news") + " world";
 }
 
 async function fetchPexelsImages(query, count, apiKey, category) {
@@ -272,7 +263,9 @@ export default async function handler(req, res) {
   }
 
   const pexelsKey = process.env.PEXELS_API_KEY;
-  const geminiKey = process.env.VITE_GEMINI_API_KEY; // already set for the script-generation step
+  // (Gemini keyword extraction removed — see getStockKeywords above.
+  // That call added a full network round-trip per render, which matters
+  // now that we're up against Vercel's 60s function limit.)
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -312,7 +305,7 @@ export default async function handler(req, res) {
 
     const [imagePaths] = await Promise.all([
       (async () => {
-        const stockKeywords = await getStockKeywords(headline, category, geminiKey);
+        const stockKeywords = getStockKeywords(headline, category);
         const imageUrls = await fetchPexelsImages(stockKeywords, IMAGE_COUNT, pexelsKey, category);
         return Promise.all(imageUrls.map(async (url, i) => {
           const dest = path.join(workDir, "img" + i + ".jpg");
@@ -345,7 +338,7 @@ export default async function handler(req, res) {
       "-filter_complex", filterComplex,
       "-map", "[" + finalLabel + "]",
       "-map", imagePaths.length + ":a",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p",
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
       "-c:a", "aac",
       "-shortest",
       "-y", outputPath
