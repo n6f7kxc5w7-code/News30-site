@@ -41,11 +41,49 @@ import ffmpegPath from "ffmpeg-static";
 
 const execFileAsync = promisify(execFile);
 
-const VIDEO_DURATION_SECONDS = 30;
+const FALLBACK_DURATION_SECONDS = 30; // only used if duration detection somehow fails
 const IMAGE_COUNT = 5; // 30s / 5 = 6s per image
 const WIDTH = 1080;
 const HEIGHT = 1920;
 const FPS = 25;
+
+// Turns a specific news headline into broad, generic keywords a stock
+// photo library can actually match. Pexels doesn't have photos of
+// specific real events ("Iran USA strikes") — searching the literal
+// headline either returns almost nothing (forcing the same-image-
+// repeated fallback) or something thematically unrelated. Asking
+// Gemini for the underlying visual THEME (e.g. "military aircraft",
+// "government building", "flag") instead of the literal event fixes
+// both problems at once, since they were really the same root cause.
+async function getStockKeywords(headline, category, geminiKey) {
+  if (!geminiKey) return category || "news"; // graceful fallback, no hard dependency
+  try {
+    const prompt =
+      "Convert this news headline into 3-4 broad, generic English keywords " +
+      "suitable for searching a GENERIC STOCK PHOTO library (like Pexels or Shutterstock). " +
+      "Focus on visual THEMES and CONCEPTS a stock library would actually have photos of " +
+      "(e.g. 'military aircraft', 'government building', 'stock market', 'courtroom') " +
+      "— NOT specific real people, countries, or named events, since stock libraries don't " +
+      "have those. Output ONLY the comma-separated keywords, nothing else.\n\n" +
+      "Category: " + (category || "general") + "\n" +
+      "Headline: " + headline;
+
+    const res = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + encodeURIComponent(geminiKey),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+      }
+    );
+    if (!res.ok) return category || "news";
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return (text && text.trim()) || category || "news";
+  } catch (e) {
+    return category || "news"; // never let a keyword-extraction hiccup break the whole pipeline
+  }
+}
 
 async function fetchPexelsImages(query, count, apiKey, category) {
   const search = async (q) => {
@@ -84,6 +122,28 @@ async function downloadToFile(url, destPath) {
   if (!res.ok) throw new Error("Failed to download " + url + ": " + res.status);
   const buffer = Buffer.from(await res.arrayBuffer());
   await fs.writeFile(destPath, buffer);
+}
+
+// Measures the real duration of the narration audio instead of assuming
+// it's always exactly 30 seconds. Fish Audio's actual speaking pace
+// varies slightly script to script — basing caption/image timing on a
+// fixed assumption is what caused captions to drift out of sync
+// ("lagging behind the narrator") on longer scripts. Uses only the
+// already-bundled ffmpeg binary (running `ffmpeg -i file` with no
+// output prints Duration to stderr before erroring — a standard trick
+// that avoids needing to also bundle ffprobe as a second binary).
+async function getAudioDuration(audioPath) {
+  try {
+    await execFileAsync(ffmpegPath, ["-i", audioPath]);
+    // Shouldn't reach here — ffmpeg always errors with no output specified.
+    return FALLBACK_DURATION_SECONDS;
+  } catch (e) {
+    const output = (e.stderr || e.message || "").toString();
+    const match = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (!match) return FALLBACK_DURATION_SECONDS;
+    const [, h, m, s] = match;
+    return parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s);
+  }
 }
 
 // Splits the script into short caption chunks (3-5 words each) and
@@ -154,8 +214,8 @@ function buildAss(captionChunks) {
   return header + events;
 }
 
-function buildFilterComplex(imagePaths, assPath, fontsDir) {
-  const perImageSeconds = VIDEO_DURATION_SECONDS / imagePaths.length;
+function buildFilterComplex(imagePaths, assPath, fontsDir, totalSeconds) {
+  const perImageSeconds = totalSeconds / imagePaths.length;
   const framesPerImage = Math.round(perImageSeconds * FPS);
   const parts = [];
   const zoomLabels = [];
@@ -212,6 +272,7 @@ export default async function handler(req, res) {
   }
 
   const pexelsKey = process.env.PEXELS_API_KEY;
+  const geminiKey = process.env.VITE_GEMINI_API_KEY; // already set for the script-generation step
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -243,7 +304,8 @@ export default async function handler(req, res) {
     await supabase.from("video_jobs").update({ status: "rendering", updated_at: new Date().toISOString() }).eq("id", jobId);
 
     // 1) Real images matched to the story topic.
-    const searchQuery = (category ? category + " " : "") + headline;
+    const stockKeywords = await getStockKeywords(headline, category, geminiKey);
+    const searchQuery = stockKeywords;
     const imageUrls = await fetchPexelsImages(searchQuery, IMAGE_COUNT, pexelsKey, category);
     const imagePaths = await Promise.all(imageUrls.map(async (url, i) => {
       const dest = path.join(workDir, "img" + i + ".jpg");
@@ -255,17 +317,23 @@ export default async function handler(req, res) {
     const audioPath = path.join(workDir, "audio.mp3");
     await downloadToFile(job.audio_url, audioPath);
 
+    // 2b) Measure how long the narration ACTUALLY is — this is the fix
+    // for captions drifting out of sync. Everything below (caption
+    // timing, per-image duration, total video length) now derives from
+    // this real number instead of assuming a fixed 30 seconds.
+    const realDuration = await getAudioDuration(audioPath);
+
     // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in
-    //    captions via a real .srt file (subtitles filter, not drawtext).
-    const captionChunks = buildCaptionChunks(job.script || headline, VIDEO_DURATION_SECONDS);
+    //    captions via a real .ass file (subtitles filter, not drawtext).
+    const captionChunks = buildCaptionChunks(job.script || headline, realDuration);
     const assPath = path.join(workDir, "captions.ass");
     await fs.writeFile(assPath, buildAss(captionChunks), "utf8");
     const fontsDir = path.dirname(fileURLToPath(new URL("./LiberationSans-Bold.ttf", import.meta.url)));
-    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, assPath, fontsDir);
+    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, assPath, fontsDir, realDuration);
 
     const outputPath = path.join(workDir, "output.mp4");
     const args = [];
-    imagePaths.forEach((p) => { args.push("-loop", "1", "-t", String(VIDEO_DURATION_SECONDS / imagePaths.length), "-i", p); });
+    imagePaths.forEach((p) => { args.push("-loop", "1", "-t", String(realDuration / imagePaths.length), "-i", p); });
     args.push("-i", audioPath);
     args.push(
       "-filter_complex", filterComplex,
