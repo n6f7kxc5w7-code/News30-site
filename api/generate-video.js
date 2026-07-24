@@ -58,14 +58,16 @@ const FPS = 25;
 // function limit. This instant keyword-matching approach trades a
 // little relevance-smarts for guaranteed zero added latency.
 const STOCK_KEYWORD_MAP = [
-  { triggers: ["strike", "military", "war", "troops", "missile", "attack", "conflict"], keywords: "military aircraft flag" },
-  { triggers: ["election", "vote", "parliament", "president", "government", "minister"], keywords: "government building flag" },
-  { triggers: ["market", "stock", "economy", "inflation", "bank", "trade", "profit"], keywords: "stock market finance" },
-  { triggers: ["court", "trial", "lawsuit", "judge", "legal", "sentenced"], keywords: "courtroom justice gavel" },
-  { triggers: ["climate", "weather", "storm", "flood", "heat", "hurricane"], keywords: "weather storm clouds" },
-  { triggers: ["football", "soccer", "match", "goal", "tournament", "championship", "team", "player"], keywords: "stadium sports crowd" },
-  { triggers: ["tech", "ai", "software", "app", "startup", "chip"], keywords: "technology office computer" },
-  { triggers: ["health", "hospital", "disease", "vaccine", "medical"], keywords: "hospital medical healthcare" },
+  { triggers: ["strike", "military", "war", "troops", "missile", "attack", "conflict", "defence", "defense", "army", "navy"], keywords: "military aircraft flag" },
+  { triggers: ["election", "vote", "parliament", "president", "government", "minister", "policy", "law", "bill"], keywords: "government building flag" },
+  { triggers: ["market", "stock", "economy", "inflation", "bank", "trade", "profit", "gdp", "interest rate", "currency"], keywords: "stock market finance" },
+  { triggers: ["court", "trial", "lawsuit", "judge", "legal", "sentenced", "charges", "prosecut"], keywords: "courtroom justice gavel" },
+  { triggers: ["climate", "weather", "storm", "flood", "heat", "hurricane", "wildfire", "drought"], keywords: "weather storm clouds" },
+  { triggers: ["football", "soccer", "match", "goal", "tournament", "championship", "team", "player", "coach", "transfer"], keywords: "stadium sports crowd" },
+  { triggers: ["tech", "ai", "software", "app", "startup", "chip", "robot", "data"], keywords: "technology office computer" },
+  { triggers: ["health", "hospital", "disease", "vaccine", "medical", "drug", "treatment"], keywords: "hospital medical healthcare" },
+  { triggers: ["space", "nasa", "rocket", "satellite", "astronaut"], keywords: "space rocket stars" },
+  { triggers: ["protest", "rally", "demonstration", "strike action"], keywords: "crowd protest city street" },
 ];
 
 function getStockKeywords(headline, category) {
@@ -77,11 +79,19 @@ function getStockKeywords(headline, category) {
 }
 
 async function fetchPexelsImages(query, count, apiKey, category) {
+  // Random page picked per-request so the SAME query text (e.g. every
+  // finance story hitting "stock market finance") doesn't always return
+  // the exact same frozen top-5 photos forever — this was the real
+  // cause of "the same picture keeps looping," across different videos,
+  // not just within one.
+  const randomPage = () => 1 + Math.floor(Math.random() * 5);
+
   const search = async (q) => {
     const url =
       "https://api.pexels.com/v1/search?query=" +
       encodeURIComponent(q) +
       "&per_page=" + count +
+      "&page=" + randomPage() +
       "&orientation=portrait";
     const res = await fetch(url, { headers: { Authorization: apiKey } });
     if (!res.ok) throw new Error("Pexels request failed: " + res.status);
@@ -180,8 +190,13 @@ function assTimestamp(totalSeconds) {
 //
 // Also confirmed by testing: with BorderStyle=3 (opaque box behind the
 // text), the "Outline" field must be a nonzero value — that field
-// controls the box's padding/thickness in this mode, and with Outline=0
+// controls the box's padding/thickness in that mode, and with Outline=0
 // the box silently collapses to nothing (text still shows, box doesn't).
+//
+// STYLE UPDATE: switched from the black-box look to a bold white
+// "impact" style (thick black outline stroke around the letters
+// themselves, no solid box) — this is BorderStyle=1 instead of 3,
+// where "Outline" becomes stroke thickness rather than box padding.
 function buildAss(captionChunks) {
   const header =
     "[Script Info]\n" +
@@ -191,10 +206,11 @@ function buildAss(captionChunks) {
     "ScaledBorderAndShadow: yes\n\n" +
     "[V4+ Styles]\n" +
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
-    // BackColour uses full opacity (&H00 alpha) — semi-transparent alpha
-    // was tested and silently ignored by this render path, so a solid
-    // box is used instead (still clean and highly readable).
-    "Style: Default,Liberation Sans,58,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,3,8,0,2,60,60,140,1\n\n" +
+    // BorderStyle=1 (outline, not box). Outline=6 is the stroke
+    // thickness around each letter. Shadow=2 adds a slight drop shadow
+    // for depth/legibility over busy photos, same principle a box gave
+    // us before, just without covering part of the image.
+    "Style: Default,Liberation Sans,68,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,6,2,2,40,40,150,1\n\n" +
     "[Events]\n" +
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
 
