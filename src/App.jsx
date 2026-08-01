@@ -27,16 +27,15 @@ const env = (key) =>
 
 const CONFIG = {
   AI: {
-    // 🔌 AI API — Google Gemini ────────────────────────────────────
-    // Generous free tier. Create a key at aistudio.google.com and set
-    // VITE_GEMINI_API_KEY. Without it, every AI feature serves the
-    // labelled sample responses instead — the UI never breaks.
-    // Tip: VITE_ vars ship in the bundle, so add "Website restrictions"
-    // to the key (AI Studio / Cloud console) limiting it to your
-    // domains — and proxy through a backend before a public launch.
-    ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models",
-    MODEL: "gemini-2.5-flash",
-    API_KEY: env("VITE_GEMINI_API_KEY"),
+    // 🔌 AI API — Google Gemini, via server proxy ───────────────────
+    // The real key now lives ONLY server-side (Vercel env var
+    // GEMINI_API_KEY, see api/ask-ai.js) — never shipped to the
+    // browser bundle. This fixes a real incident: the old client-side
+    // VITE_GEMINI_API_KEY setup got the key auto-suspended by Google's
+    // abuse scanners after it was found exposed in the public bundle.
+    // The frontend now just calls its own domain; no key handling here
+    // at all, so there's nothing left for a scanner to find.
+    ENDPOINT: "/api/ask-ai",
   },
   GOOGLE_OAUTH: {
     // 🔌 GOOGLE OAUTH — LIVE ─────────────────────────────────────────
@@ -785,34 +784,20 @@ function userDataReducer(state, action) {
    in mockAI, so the UI never breaks without a connection.            */
 
 async function callAI({ system, messages, useWebSearch = false }) {
-  if (!CONFIG.AI.API_KEY) throw new Error("No AI key configured"); // → sample fallback
-  const body = {
-    contents: messages,
-    systemInstruction: { parts: [{ text: system }] },
-    generationConfig: { maxOutputTokens: 1000 },
-  };
-  if (useWebSearch) body.tools = [{ google_search: {} }]; // Gemini search grounding
-  const res = await fetch(CONFIG.AI.ENDPOINT + "/" + CONFIG.AI.MODEL + ":generateContent?key=" + encodeURIComponent(CONFIG.AI.API_KEY), {
+  const res = await fetch(CONFIG.AI.ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ system, messages, useWebSearch }),
   });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      const errJson = await res.json();
-      detail = (errJson.error && errJson.error.message) || JSON.stringify(errJson);
-    } catch (e2) {
-      try { detail = await res.text(); } catch (e3) { /* ignore */ }
-    }
-    throw new Error("AI request failed: " + res.status + " — " + detail);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    // Covers both "no key configured on the server yet" and real
+    // Gemini errors — either way, callers already catch this and fall
+    // back to sample/mock responses so the UI never breaks.
+    throw new Error(data.error || ("AI request failed: " + res.status));
   }
-  const data = await res.json();
-  const cand = data.candidates && data.candidates[0];
-  const parts = (cand && cand.content && cand.content.parts) || [];
-  const text = parts.map((pt) => pt.text || "").join("").trim();
-  if (!text) throw new Error("Empty AI response");
-  return text;
+  if (!data.text) throw new Error("Empty AI response");
+  return data.text;
 }
 
 /* Gemini chat history uses role "model" (not "assistant") + parts[]. */
@@ -821,7 +806,7 @@ const toApiHistory = (history) =>
     .filter((m) => !m.pending)
     .map((m) => ({ role: m.role === "ai" ? "model" : "user", parts: [{ text: m.text }] }));
 
-const sampleNote = "\n\n— Sample response. Add VITE_GEMINI_API_KEY to switch on live AI answers.";
+const sampleNote = "\n\n— Sample response. Add GEMINI_API_KEY on the server to switch on live AI answers.";
 
 const mockAI = {
   news(question) {
