@@ -45,13 +45,14 @@ const CONFIG = {
     // and is deliberately absent from this file.
     CLIENT_ID: "538312385751-r7mj5q8slibo3irg0sr32kf0378mvj18.apps.googleusercontent.com",
   },
-  EMAIL: {
-    // 🔌 EMAIL SERVICE CONNECTION POINT (Mailchimp / Resend / etc.) ──
-    // Sending belongs server-side; these envs exist for when the calls
-    // are proxied through your backend.
+    EMAIL: {
+    // 🔌 EMAIL SERVICE — via server proxy (not yet built) ────────────
+    // Key must live server-side only, in EMAIL_API_KEY (no VITE_
+    // prefix), read by /api/send-email.js. Never put an email
+    // provider key behind a VITE_ var — that ships it to the browser
+    // bundle, which is exactly what got the Gemini key suspended.
     PROVIDER: "resend", // or "mailchimp"
-    API_KEY: env("VITE_EMAIL_API_KEY"),
-    AUDIENCE_ID: env("VITE_EMAIL_AUDIENCE_ID"),
+    ENDPOINT: "/api/send-email",
   },
   NEWS_API: {
     // 🔌 NEWS API — LIVE via server proxy ─────────────────────────────
