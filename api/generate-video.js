@@ -36,6 +36,19 @@
 //    billion, "app" matched appeal, "war" matched warning, and "heat"
 //    matched wheat. Now matched on word boundaries with a scoring pass
 //    across all categories instead of first-match-wins.
+//
+// 4. IMAGE QUERIES NOW COME FROM GEMINI. The keyword map can only
+//    recognise vocabulary it was written for — headlines like "Israel
+//    and Hamas agree ceasefire framework" or "Bitcoin falls after ETF
+//    outflows" score zero triggers and fall through to generic photos.
+//    generate-audio.js now asks Gemini for three stock-photo search
+//    phrases in the same call that produces the script (no extra
+//    round-trip, which is what made the old step-3 Gemini call
+//    untenable against the 60s limit) and stores them on the job row.
+//    This function reads job.image_queries first and only falls back to
+//    the map below when they're missing or unusable.
+//
+//    Requires: alter table video_jobs add column if not exists image_queries jsonb;
 // ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -463,8 +476,20 @@ export default async function handler(req, res) {
 
     const [imagePaths] = await Promise.all([
       (async () => {
-        const queries = getStockQueries(headline, category);
-        console.log("[generate-video] stock queries:", queries.join(" | "));
+        // Prefer the search phrases Gemini produced alongside the script
+        // in generate-audio.js — it understands that "ceasefire framework"
+        // should look like a negotiation table, whereas the keyword map
+        // below can only recognise vocabulary it was written for.
+        // The map remains as a fallback so an unparseable or missing
+        // Gemini response degrades to the old behaviour instead of
+        // failing the render.
+        const fromGemini = Array.isArray(job.image_queries) ? job.image_queries : [];
+        const usingGemini = fromGemini.length > 0;
+        const queries = usingGemini ? fromGemini : getStockQueries(headline, category);
+        console.log(
+          "[generate-video] queries (" + (usingGemini ? "gemini" : "keyword map") + "):",
+          queries.join(" | ")
+        );
         const imageUrls = await fetchPexelsImages(queries, IMAGE_COUNT, pexelsKey, category);
         console.log("[generate-video] unique images fetched:", imageUrls.length);
         return Promise.all(imageUrls.map(async (url, i) => {
