@@ -23,6 +23,12 @@
   #log { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
   .logline { font-size: 12.5px; color: #ccc; font-family: monospace; }
   .logtime { color: #666; }
+  .modes { display: flex; gap: 8px; margin-bottom: 14px; }
+  .modes button { margin: 0; background: #2a2a2a; color: #bbb; font-weight: 600; }
+  .modes button.active { background: #3ea6ff; color: #04182b; }
+  .hint { font-size: 12px; color: #888; margin: -4px 0 12px; line-height: 1.45; }
+  .queries { font-size: 12.5px; color: #8fd19e; font-family: monospace; margin-top: 6px; word-break: break-word; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -31,6 +37,18 @@
   <p class="sub">Runs on news30.live itself, so there's no cross-origin issue — same domain calling its own API.</p>
 
   <div class="card">
+    <label>Script source</label>
+    <div class="modes">
+      <button id="modeAi" class="active">Generate with AI</button>
+      <button id="modeManual">Write it myself</button>
+    </div>
+    <p class="hint" id="modeHint">
+      Sends only the headline. Gemini writes the script <em>and</em> picks three
+      stock-photo search phrases in the same call — this is the path that
+      produces relevant images. Watch for
+      <code>queries (gemini)</code> in the Vercel logs.
+    </p>
+
     <label>Headline</label>
     <input id="headline" value="EU leaders strike provisional deal on joint defence fund">
 
@@ -41,8 +59,10 @@
       <option value="sports">Sports</option>
     </select>
 
-    <label>Script (edit freely for testing)</label>
-    <textarea id="script" rows="4">Your news in 30 seconds. EU leaders just struck a provisional deal on a joint defence fund after an overnight summit. The agreement still needs approval from national parliaments before it takes effect. Financing details between member states remain unresolved. More on this as ratification votes begin across Europe.</textarea>
+    <div id="scriptWrap" class="hidden">
+      <label>Script</label>
+      <textarea id="script" rows="4">Your news in 30 seconds. EU leaders just struck a provisional deal on a joint defence fund after an overnight summit. The agreement still needs approval from national parliaments before it takes effect. Financing details between member states remain unresolved. More on this as ratification votes begin across Europe.</textarea>
+    </div>
   </div>
 
   <button id="btnAudio">Step 1 — Generate audio</button>
@@ -54,6 +74,7 @@
       <span class="pill" id="statusPill">not started</span>
     </div>
     <div class="meta" id="jobMeta"></div>
+    <div id="scriptBox"></div>
     <div id="audioBox"></div>
     <div id="videoBox"></div>
   </div>
@@ -65,7 +86,30 @@
 </div>
 
 <script>
-  let jobId = null, audioUrl = null, renderId = null, pollTimer = null;
+  let jobId = null, audioUrl = null, pollTimer = null;
+  let mode = 'ai'; // 'ai' | 'manual'
+
+  const AI_HINT =
+    'Sends only the headline. Gemini writes the script <em>and</em> picks three ' +
+    'stock-photo search phrases in the same call — this is the path that produces ' +
+    'relevant images. Watch for <code>queries (gemini)</code> in the Vercel logs.';
+
+  const MANUAL_HINT =
+    'Sends your script as-is and skips Gemini entirely. No image queries are ' +
+    'produced, so generate-video falls back to the hardcoded keyword map — you\'ll ' +
+    'see <code>queries (keyword map)</code> in the logs and generic photos. Useful ' +
+    'for isolating TTS or FFmpeg problems without spending a Gemini call.';
+
+  function setMode(next) {
+    mode = next;
+    document.getElementById('modeAi').classList.toggle('active', next === 'ai');
+    document.getElementById('modeManual').classList.toggle('active', next === 'manual');
+    document.getElementById('scriptWrap').classList.toggle('hidden', next === 'ai');
+    document.getElementById('modeHint').innerHTML = next === 'ai' ? AI_HINT : MANUAL_HINT;
+  }
+
+  document.getElementById('modeAi').addEventListener('click', () => setMode('ai'));
+  document.getElementById('modeManual').addEventListener('click', () => setMode('manual'));
 
   function addLog(line) {
     const el = document.getElementById('log');
@@ -83,35 +127,68 @@
     pill.style.background = s === 'done' ? '#2ba640' : s === 'failed' ? '#ff4e45' : s ? '#3ea6ff' : '#666';
   }
 
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
   document.getElementById('btnAudio').addEventListener('click', async () => {
     const btn = document.getElementById('btnAudio');
-    btn.disabled = true; btn.textContent = 'Generating audio…';
-    addLog('Calling /api/generate-audio ...');
+    btn.disabled = true;
+    btn.textContent = mode === 'ai' ? 'Writing script + generating audio…' : 'Generating audio…';
+    addLog('Calling /api/generate-audio (' + mode + ' mode) ...');
     try {
-      const script = document.getElementById('script').value;
+      const headline = document.getElementById('headline').value;
+      const category = document.getElementById('category').value;
+
+      // AI mode omits `script` entirely — that's what triggers the Gemini
+      // path in generate-audio.js. Sending a script always wins, which is
+      // exactly why manual mode never produced image queries.
+      const payload = { storyId: 'test-' + Date.now(), headline, category };
+      if (mode === 'manual') payload.script = document.getElementById('script').value;
+
       const r = await fetch('/api/generate-audio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storyId: 'test-' + Date.now(), script }),
+        body: JSON.stringify(payload),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || ('Request failed: ' + r.status));
-      jobId = data.jobId; audioUrl = data.audioUrl;
+
+      jobId = data.jobId;
+      audioUrl = data.audioUrl;
       addLog('✅ Audio ready. Job id: ' + jobId);
       document.getElementById('jobMeta').textContent = 'Job id: ' + jobId;
+
+      let scriptHtml = '';
+      if (data.script) {
+        scriptHtml += '<div class="meta">Script used:</div>' +
+          '<div class="logline">' + escapeHtml(data.script) + '</div>';
+      }
+      if (data.imageQueries && data.imageQueries.length) {
+        addLog('🖼 Image queries from Gemini: ' + data.imageQueries.join(' | '));
+        scriptHtml += '<div class="meta" style="margin-top:8px;">Image queries:</div>' +
+          '<div class="queries">' + escapeHtml(data.imageQueries.join('  |  ')) + '</div>';
+      } else {
+        addLog('⚠️ No image queries returned — generate-video will fall back to the keyword map.');
+      }
+      document.getElementById('scriptBox').innerHTML = scriptHtml;
+
       document.getElementById('audioBox').innerHTML =
-        '<div class="meta">Narration audio:</div><audio controls src="' + audioUrl + '"></audio>';
+        '<div class="meta" style="margin-top:8px;">Narration audio:</div><audio controls src="' + audioUrl + '"></audio>';
       document.getElementById('btnVideo').disabled = false;
     } catch (e) {
       addLog('❌ ' + e.message);
     }
-    btn.disabled = false; btn.textContent = 'Step 1 — Generate audio';
+    btn.disabled = false;
+    btn.textContent = 'Step 1 — Generate audio';
   });
 
   document.getElementById('btnVideo').addEventListener('click', async () => {
     if (!jobId) { addLog('⚠️ Run step 1 first.'); return; }
     const btn = document.getElementById('btnVideo');
-    btn.disabled = true; btn.textContent = 'Submitting render…';
+    btn.disabled = true; btn.textContent = 'Rendering…';
     addLog('Calling /api/generate-video ...');
     try {
       const headline = document.getElementById('headline').value;
@@ -123,11 +200,18 @@
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || ('Request failed: ' + r.status));
-      renderId = data.renderId;
+
       setStatus(data.status);
-      addLog('✅ Render queued. Render id: ' + renderId);
-      addLog('Polling every 5s for completion ...');
-      startPolling();
+      if (data.imageCount) addLog('🖼 Unique images used: ' + data.imageCount);
+
+      if (data.videoUrl) {
+        addLog('🎉 Video finished: ' + data.videoUrl);
+        document.getElementById('videoBox').innerHTML =
+          '<div class="meta">Finished video:</div><video controls src="' + data.videoUrl + '"></video>';
+      } else {
+        addLog('Polling every 5s for completion ...');
+        startPolling();
+      }
     } catch (e) {
       addLog('❌ ' + e.message);
     }
@@ -158,6 +242,8 @@
       }
     }, 5000);
   }
+
+  setMode('ai');
 </script>
 </body>
 </html>
