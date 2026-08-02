@@ -701,6 +701,7 @@ const db = {
       })
       .then(() => {});
   },
+};
 
 function userDataReducer(state, action) {
   switch (action.type) {
