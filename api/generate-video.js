@@ -1,34 +1,42 @@
 // /api/generate-video.js
-// 🔌 STEP 3 OF THE VIDEO PIPELINE — FFmpeg version (free, self-hosted,
-// replaces Shotstack). Downloads real Pexels images + the Fish Audio
-// narration into /tmp, uses FFmpeg (via ffmpeg-static, a bundled free
-// binary — no paid API) to assemble a 1080x1920 video with a gentle
-// Ken Burns zoom on each image and BURNED-IN captions generated from
-// the script itself, muxes in the narration audio, then uploads the
-// finished MP4 to Supabase Storage.
-//
-// ⚠️ HONEST FLAG: running FFmpeg inside a Vercel serverless function is
-// a known rough edge — several developers report it working locally
-// then failing in production with "binary not found," or hitting
-// function size/time limits. This is written as carefully as
-// reasonably possible, but if it fails on first deploy, the error
-// message will tell us which of these it is, and there are fallbacks
-// (see comments below) rather than starting over from scratch.
+// 🔌 STEP 3 OF THE VIDEO PIPELINE — FFmpeg version (free, self-hosted).
+// Downloads real Pexels images + the Fish Audio narration into /tmp,
+// uses FFmpeg (via ffmpeg-static) to assemble a 720x1280 video with a
+// gentle Ken Burns zoom per image and burned-in captions, muxes in the
+// narration, then uploads the finished MP4 to Supabase Storage.
 //
 // Required Vercel env vars (server-only, no "VITE_" prefix):
 //   PEXELS_API_KEY
-//   SUPABASE_SERVICE_ROLE_KEY   (already added for generate-audio.js)
-// Reuses VITE_SUPABASE_URL. SHOTSTACK_API_KEY is no longer needed —
-// safe to remove once this is confirmed working.
+//   SUPABASE_SERVICE_ROLE_KEY
+//   PIPELINE_ENABLED           (set to "false" to kill all rendering
+//                               instantly without a redeploy — see below)
+// Reuses VITE_SUPABASE_URL.
 //
-// Because FFmpeg renders synchronously inside this one function call
-// (unlike Shotstack's async webhook), this function does the ENTIRE
-// job in one request: fetch images -> download -> render -> upload ->
-// mark the job "done" -> return. If the video_jobs row is still stuck
-// on "rendering" a while after this call returns, it means the
-// function hit Vercel's time limit before finishing (see maxDuration
-// in vercel.json) — the fix there is fewer/shorter images, not more
-// code here.
+// ─── FIXES IN THIS VERSION ──────────────────────────────────────────
+// 1. THE "SAME IMAGE FOR THE WHOLE VIDEO" BUG. zoompan's `d` parameter
+//    is the number of output frames generated PER INPUT FRAME, not the
+//    total length of the segment. Inputs here are `-loop 1 -t 6 -i img`,
+//    which already produce ~150 frames each, so `d=150` was asking for
+//    150 x 150 = ~22,500 frames from image 1 alone. `-shortest` then cut
+//    the video at the audio length, so the finished video showed only
+//    the first image, crawling, start to finish. Fixed by using `d=1`
+//    (one output frame per input frame) and driving the zoom off `on`,
+//    the output frame counter, so the Ken Burns effect still ramps
+//    smoothly across each segment.
+//
+// 2. THE PADDING LOOP THAT REPEATED IMAGE ZERO. The old line
+//       while (photos.length < count) photos.push(photos[photos.length % photos.length]);
+//    computes n % n, which is always 0 — so short result sets were
+//    padded with five copies of the same photo. Replaced with a proper
+//    multi-query fill that only ever adds genuinely new photos, and
+//    accepts a shorter video over a repeated one.
+//
+// 3. SUBSTRING KEYWORD MATCHING. The old map used `lower.includes(t)`,
+//    so "ai" matched Ukraine / aid / campaign / air, "bill" matched
+//    billion, "app" matched appeal, "war" matched warning, and "heat"
+//    matched wheat. Now matched on word boundaries with a scoring pass
+//    across all categories instead of first-match-wins.
+// ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
 import { execFile } from "child_process";
@@ -41,81 +49,224 @@ import ffmpegPath from "ffmpeg-static";
 
 const execFileAsync = promisify(execFile);
 
-const FALLBACK_DURATION_SECONDS = 30; // only used if duration detection somehow fails
-const IMAGE_COUNT = 5; // testing showed count barely affects render time vs resolution/preset —
-                        // keeping 5 for better pacing/retention (~5s per image, not ~8s)
+const FALLBACK_DURATION_SECONDS = 30;
+const IMAGE_COUNT = 5;
+const MIN_IMAGE_COUNT = 3; // ship a shorter rotation rather than repeat a photo
 const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 25;
 
-// Turns a specific news headline into broad, generic keywords a stock
-// photo library can actually match — WITHOUT a network round-trip.
-// Pexels doesn't have photos of specific real events ("Iran USA
-// strikes"), so searching the literal headline either returns almost
-// nothing or something unrelated. This used to ask Gemini to do this
-// conversion, but that added a full API round-trip to every render —
-// real seconds that matter now that we're up against Vercel's 60s
-// function limit. This instant keyword-matching approach trades a
-// little relevance-smarts for guaranteed zero added latency.
-const STOCK_KEYWORD_MAP = [
-  { triggers: ["strike", "military", "war", "troops", "missile", "attack", "conflict", "defence", "defense", "army", "navy"], keywords: "military aircraft flag" },
-  { triggers: ["election", "vote", "parliament", "president", "government", "minister", "policy", "law", "bill"], keywords: "government building flag" },
-  { triggers: ["market", "stock", "economy", "inflation", "bank", "trade", "profit", "gdp", "interest rate", "currency"], keywords: "stock market finance" },
-  { triggers: ["court", "trial", "lawsuit", "judge", "legal", "sentenced", "charges", "prosecut"], keywords: "courtroom justice gavel" },
-  { triggers: ["climate", "weather", "storm", "flood", "heat", "hurricane", "wildfire", "drought"], keywords: "weather storm clouds" },
-  { triggers: ["football", "soccer", "match", "goal", "tournament", "championship", "team", "player", "coach", "transfer"], keywords: "stadium sports crowd" },
-  { triggers: ["tech", "ai", "software", "app", "startup", "chip", "robot", "data"], keywords: "technology office computer" },
-  { triggers: ["health", "hospital", "disease", "vaccine", "medical", "drug", "treatment"], keywords: "hospital medical healthcare" },
-  { triggers: ["space", "nasa", "rocket", "satellite", "astronaut"], keywords: "space rocket stars" },
-  { triggers: ["protest", "rally", "demonstration", "strike action"], keywords: "crowd protest city street" },
+// Only these origins may trigger a render. This endpoint spends real
+// money (Pexels quota, Supabase storage, function time), so it must not
+// be callable from arbitrary sites.
+const ALLOWED_ORIGINS = [
+  "https://news30.live",
+  "https://www.news30.live",
+  "http://localhost:5173",
 ];
 
-function getStockKeywords(headline, category) {
-  const lower = (headline || "").toLowerCase();
-  for (const entry of STOCK_KEYWORD_MAP) {
-    if (entry.triggers.some((t) => lower.includes(t))) return entry.keywords;
+/* ───────────────────────── KEYWORD MATCHING ─────────────────────────
+
+   Each bucket now carries SEVERAL distinct search phrases rather than
+   one. Two reasons:
+
+   (a) Variety. Running one query and taking the top 5 gives five near
+       identical photos, because stock libraries cluster visually
+       similar results together. Running three different queries and
+       taking a couple from each produces a visibly varied sequence.
+
+   (b) Depth. If one phrase returns thin results, the others fill the
+       gap with on-topic images instead of falling back to something
+       generic.
+
+   Triggers are matched on word boundaries. A trailing `*` means prefix
+   match (so "prosecut*" catches prosecuted / prosecution / prosecutors).
+*/
+const STOCK_KEYWORD_MAP = [
+  {
+    triggers: ["strike*", "military", "war", "troops", "missile", "attack*", "conflict", "defence", "defense", "army", "navy", "soldier*", "airstrike*"],
+    queries: ["military aircraft sky", "soldiers formation uniform", "naval warship sea"],
+  },
+  {
+    triggers: ["election*", "vote*", "parliament", "president", "government", "minister*", "policy", "policies", "law", "laws", "bill", "senate", "congress", "summit", "treaty", "diplomat*"],
+    queries: ["government parliament building", "national flags row", "podium press conference"],
+  },
+  {
+    triggers: ["market*", "stock*", "econom*", "inflation", "bank*", "trade", "profit*", "gdp", "interest rate", "currency", "shares", "investor*", "recession", "tariff*"],
+    queries: ["stock market trading screen", "financial district skyline", "currency banknotes closeup"],
+  },
+  {
+    triggers: ["court*", "trial", "lawsuit", "judge*", "legal", "sentenc*", "charges", "prosecut*", "verdict", "appeal"],
+    queries: ["courtroom interior", "judge gavel desk", "law books library"],
+  },
+  {
+    triggers: ["climate", "weather", "storm*", "flood*", "heat", "heatwave", "hurricane", "wildfire*", "drought", "emissions", "wildlife"],
+    queries: ["storm clouds dramatic sky", "flooded street water", "wildfire smoke landscape"],
+  },
+  {
+    triggers: ["football", "soccer", "match", "goal*", "tournament", "championship", "team*", "player*", "coach", "transfer", "league", "olympic*", "cricket", "tennis"],
+    queries: ["stadium crowd floodlights", "football pitch aerial", "athlete running track"],
+  },
+  {
+    triggers: ["tech", "ai", "artificial intelligence", "software", "app", "startup*", "chip*", "robot*", "data", "cyber*", "semiconductor*", "algorithm*"],
+    queries: ["server room data centre", "circuit board macro", "person coding screen"],
+  },
+  {
+    triggers: ["health", "hospital*", "disease", "vaccine*", "medical", "drug*", "treatment", "patient*", "doctor*", "outbreak", "virus"],
+    queries: ["hospital corridor", "medical laboratory research", "doctor stethoscope hands"],
+  },
+  {
+    triggers: ["space", "nasa", "rocket*", "satellite*", "astronaut*", "orbit", "lunar", "mars"],
+    queries: ["rocket launch flames", "earth from space", "night sky stars"],
+  },
+  {
+    triggers: ["protest*", "rally", "demonstration", "march", "riot*", "strike action", "union*"],
+    queries: ["crowd protest signs", "city street march", "megaphone activist"],
+  },
+];
+
+// Sensible visuals per category, used when no trigger matches.
+const CATEGORY_FALLBACK = {
+  geopolitics: ["national flags row", "government building exterior", "world map closeup"],
+  finance: ["stock market trading screen", "financial district skyline", "currency banknotes closeup"],
+  sports: ["stadium crowd floodlights", "athlete running track", "sports equipment closeup"],
+};
+const GENERIC_FALLBACK = ["newspaper headlines closeup", "city skyline morning", "newsroom desk"];
+
+// Phrases where a trigger word carries a different meaning than the
+// bucket assumes. "EU leaders strike a deal" is not a military story.
+const FALSE_POSITIVE_PHRASES = [
+  { phrase: /strikes? (a )?deal/, suppress: "strike" },
+  { phrase: /struck (a )?deal/, suppress: "strike" },
+  { phrase: /hunger strike/, suppress: "strike" },
+  { phrase: /price war/, suppress: "war" },
+  { phrase: /trade war/, suppress: "war" },
+  { phrase: /bidding war/, suppress: "war" },
+];
+
+function triggerRegex(trigger) {
+  if (trigger.endsWith("*")) {
+    return new RegExp("\\b" + trigger.slice(0, -1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*\\b");
   }
-  return (category || "news") + " world";
+  return new RegExp("\\b" + trigger.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b");
 }
 
-async function fetchPexelsImages(query, count, apiKey, category) {
-  // Random page picked per-request so the SAME query text (e.g. every
-  // finance story hitting "stock market finance") doesn't always return
-  // the exact same frozen top-5 photos forever — this was the real
-  // cause of "the same picture keeps looping," across different videos,
-  // not just within one.
-  const randomPage = () => 1 + Math.floor(Math.random() * 5);
+// Scores every bucket against the headline and returns the best match's
+// query list, rather than taking whichever bucket happens to be listed
+// first. A headline hitting three finance words and one military word
+// now correctly reads as finance.
+function getStockQueries(headline, category) {
+  const lower = (headline || "").toLowerCase();
 
-  const search = async (q) => {
+  const suppressed = new Set();
+  for (const fp of FALSE_POSITIVE_PHRASES) {
+    if (fp.phrase.test(lower)) suppressed.add(fp.suppress);
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const bucket of STOCK_KEYWORD_MAP) {
+    let score = 0;
+    for (const trigger of bucket.triggers) {
+      const bare = trigger.replace(/\*$/, "");
+      if (suppressed.has(bare)) continue;
+      if (triggerRegex(trigger).test(lower)) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = bucket;
+    }
+  }
+
+  if (best) return best.queries;
+  return CATEGORY_FALLBACK[(category || "").toLowerCase()] || GENERIC_FALLBACK;
+}
+
+/* ────────────────────────── PEXELS FETCHING ────────────────────────── */
+
+function shuffle(arr) {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+// Fetches a POOL of candidates per query rather than exactly `count`,
+// then dedupes by Pexels photo id and shuffles. Pulling a pool is what
+// makes genuine variety possible: asking for exactly 5 and taking all 5
+// means any duplicate or dud in that set has no replacement available.
+async function fetchPexelsImages(queries, count, apiKey, category) {
+  const POOL_PER_QUERY = 15;
+  const randomPage = () => 1 + Math.floor(Math.random() * 3);
+
+  const search = async (q, orientation) => {
     const url =
       "https://api.pexels.com/v1/search?query=" +
       encodeURIComponent(q) +
-      "&per_page=" + count +
+      "&per_page=" + POOL_PER_QUERY +
       "&page=" + randomPage() +
-      "&orientation=portrait";
+      (orientation ? "&orientation=" + orientation : "");
     const res = await fetch(url, { headers: { Authorization: apiKey } });
     if (!res.ok) throw new Error("Pexels request failed: " + res.status);
     const data = await res.json();
-    return (data.photos || []).map((p) => p.src.large2x || p.src.large || p.src.original);
+    return (data.photos || []).map((p) => ({
+      id: p.id,
+      url: p.src.large2x || p.src.large || p.src.original,
+    }));
   };
 
-  let photos = await search(query);
-
-  // If the specific headline search didn't return enough UNIQUE photos,
-  // broaden with a more generic query instead of repeating the same
-  // image over and over (which is what happened before this fix).
-  if (photos.length < count) {
-    const broader = await search(category || "news").catch(() => []);
-    for (const p of broader) {
-      if (photos.length >= count) break;
-      if (!photos.includes(p)) photos.push(p);
+  // Dedupe by photo ID, not URL — the same photo can surface across
+  // several of our queries, and ID is the reliable identity.
+  const seen = new Set();
+  const pool = [];
+  const addAll = (photos) => {
+    for (const p of photos) {
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      pool.push(p);
     }
-  }
-  // Last-resort fallback only if Pexels genuinely has nothing at all.
-  if (photos.length === 0) throw new Error("Pexels returned no images for: " + query);
-  while (photos.length < count) photos.push(photos[photos.length % photos.length]);
+  };
 
-  return photos.slice(0, count);
+  // Run the topic queries in parallel; a single failing query shouldn't
+  // sink the whole render.
+  const results = await Promise.all(
+    queries.map((q) => search(q, "portrait").catch(() => []))
+  );
+  results.forEach(addAll);
+
+  // Still thin? Widen in stages before ever considering a repeat.
+  if (pool.length < count) {
+    const catQueries = CATEGORY_FALLBACK[(category || "").toLowerCase()] || GENERIC_FALLBACK;
+    const more = await Promise.all(
+      catQueries.map((q) => search(q, "portrait").catch(() => []))
+    );
+    more.forEach(addAll);
+  }
+
+  // Dropping the portrait filter roughly triples the available pool.
+  // We scale-and-crop to 720x1280 anyway, so a landscape source is
+  // usable — just more aggressively cropped.
+  if (pool.length < count) {
+    const anyOrientation = await Promise.all(
+      queries.map((q) => search(q, null).catch(() => []))
+    );
+    anyOrientation.forEach(addAll);
+  }
+
+  if (pool.length < MIN_IMAGE_COUNT) {
+    throw new Error(
+      "Pexels returned only " + pool.length + " usable images for: " + queries.join(" / ")
+    );
+  }
+
+  // Shuffle so two videos on the same topic don't open on the same shot,
+  // then take what we need. Note we return however many unique photos we
+  // have (down to MIN_IMAGE_COUNT) — a 4-image video is better than a
+  // 5-image video with a duplicate in it.
+  return shuffle(pool).slice(0, count).map((p) => p.url);
 }
 
 async function downloadToFile(url, destPath) {
@@ -125,18 +276,14 @@ async function downloadToFile(url, destPath) {
   await fs.writeFile(destPath, buffer);
 }
 
-// Measures the real duration of the narration audio instead of assuming
-// it's always exactly 30 seconds. Fish Audio's actual speaking pace
-// varies slightly script to script — basing caption/image timing on a
-// fixed assumption is what caused captions to drift out of sync
-// ("lagging behind the narrator") on longer scripts. Uses only the
-// already-bundled ffmpeg binary (running `ffmpeg -i file` with no
-// output prints Duration to stderr before erroring — a standard trick
-// that avoids needing to also bundle ffprobe as a second binary).
+/* ─────────────────────────── AUDIO / CAPTIONS ─────────────────────────── */
+
+// Measures the real narration length instead of assuming 30 seconds.
+// Running `ffmpeg -i file` with no output prints Duration to stderr
+// before erroring — avoids bundling ffprobe as a second binary.
 async function getAudioDuration(audioPath) {
   try {
     await execFileAsync(ffmpegPath, ["-i", audioPath]);
-    // Shouldn't reach here — ffmpeg always errors with no output specified.
     return FALLBACK_DURATION_SECONDS;
   } catch (e) {
     const output = (e.stderr || e.message || "").toString();
@@ -147,11 +294,6 @@ async function getAudioDuration(audioPath) {
   }
 }
 
-// Splits the script into short caption chunks (3-5 words each) and
-// spreads them evenly across the video's duration, proportional to
-// word count. No transcription/timing API needed — this is an
-// estimate, same assumption already baked into the script prompt
-// (65-75 words ≈ 30 seconds of natural speech).
 function buildCaptionChunks(script, totalSeconds) {
   const words = script.trim().split(/\s+/);
   const chunkSize = 4;
@@ -167,7 +309,6 @@ function buildCaptionChunks(script, totalSeconds) {
   }));
 }
 
-// Formats seconds as an ASS timestamp: H:MM:SS.cc (centiseconds)
 function assTimestamp(totalSeconds) {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
@@ -177,26 +318,14 @@ function assTimestamp(totalSeconds) {
   return h + ":" + pad(m, 2) + ":" + pad(s, 2) + "." + pad(cs, 2);
 }
 
-// Builds a full .ass subtitle file with the style baked directly into
-// its own [V4+ Styles] section, instead of relying on FFmpeg's
-// `force_style` override on a bare .srt.
+// Style is baked into the .ass file's own [V4+ Styles] section rather
+// than passed via force_style on a bare .srt — force_style proved
+// unreliable in testing (captions ignored MarginV/Alignment entirely).
+// PlayResX/Y must match the real output resolution or positioning drifts.
 //
-// ⚠️ WHY: force_style on a plain .srt turned out to be unreliable in
-// real testing — captions rendered at the wrong position (mid-frame,
-// ignoring MarginV/Alignment entirely) no matter what was set. Baking
-// the style into a proper .ass file (with PlayResX/Y declared to match
-// our real output resolution) is the standard, more reliable path and
-// was verified to position correctly in testing.
-//
-// Also confirmed by testing: with BorderStyle=3 (opaque box behind the
-// text), the "Outline" field must be a nonzero value — that field
-// controls the box's padding/thickness in that mode, and with Outline=0
-// the box silently collapses to nothing (text still shows, box doesn't).
-//
-// STYLE UPDATE: switched from the black-box look to a bold white
-// "impact" style (thick black outline stroke around the letters
-// themselves, no solid box) — this is BorderStyle=1 instead of 3,
-// where "Outline" becomes stroke thickness rather than box padding.
+// BorderStyle=1 is outline mode: "Outline" is stroke thickness around
+// each letter. (In BorderStyle=3, box mode, that same field is box
+// padding — and with Outline=0 the box silently collapses to nothing.)
 function buildAss(captionChunks) {
   const header =
     "[Script Info]\n" +
@@ -206,10 +335,6 @@ function buildAss(captionChunks) {
     "ScaledBorderAndShadow: yes\n\n" +
     "[V4+ Styles]\n" +
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
-    // BorderStyle=1 (outline, not box). Outline=6 is the stroke
-    // thickness around each letter. Shadow=2 adds a slight drop shadow
-    // for depth/legibility over busy photos, same principle a box gave
-    // us before, just without covering part of the image.
     "Style: Default,Liberation Sans,68,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,6,2,2,40,40,150,1\n\n" +
     "[Events]\n" +
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
@@ -221,54 +346,73 @@ function buildAss(captionChunks) {
   return header + events;
 }
 
+/* ──────────────────────────── FFMPEG GRAPH ──────────────────────────── */
+
 function buildFilterComplex(imagePaths, assPath, fontsDir, totalSeconds) {
   const perImageSeconds = totalSeconds / imagePaths.length;
-  const framesPerImage = Math.round(perImageSeconds * FPS);
+  const framesPerImage = Math.max(1, Math.round(perImageSeconds * FPS));
+
+  // Zoom ramps from 1.0 to ZOOM_MAX across the segment. Derived from the
+  // frame count so the pace is identical whatever the segment length.
+  const ZOOM_MAX = 1.15;
+  const zoomStep = (ZOOM_MAX - 1) / framesPerImage;
+
   const parts = [];
   const zoomLabels = [];
 
   imagePaths.forEach((_, i) => {
-    // Scale to fill the vertical frame, crop to exact size, then a
-    // slow zoom (Ken Burns) over the segment's duration.
     parts.push(
       "[" + i + ":v]scale=" + WIDTH + ":" + HEIGHT + ":force_original_aspect_ratio=increase," +
       "crop=" + WIDTH + ":" + HEIGHT + "," +
-      "zoompan=z='min(zoom+0.0015,1.2)':d=" + framesPerImage + ":s=" + WIDTH + "x" + HEIGHT + ":fps=" + FPS +
+      "setsar=1," +
+      // d=1 — one output frame per input frame. The input is already a
+      // looped image stream of the right length, so anything higher
+      // multiplies the frame count (this was the whole-video-is-one-image
+      // bug). `on` is the output frame index, giving a smooth linear ramp
+      // without relying on zoom accumulating between frames.
+      "zoompan=z='min(1+" + zoomStep.toFixed(6) + "*on," + ZOOM_MAX + ")'" +
+      ":d=1:s=" + WIDTH + "x" + HEIGHT + ":fps=" + FPS +
       "[v" + i + "]"
     );
     zoomLabels.push("[v" + i + "]");
   });
 
-  // Concatenate all the zoomed image segments into one continuous stream.
   parts.push(zoomLabels.join("") + "concat=n=" + imagePaths.length + ":v=1:a=0[vconcat]");
 
-  // Burn in captions via libass's `subtitles` filter instead of
-  // `drawtext` — Vercel's bundled static FFmpeg binary doesn't include
-  // drawtext (confirmed: "No such filter: 'drawtext'"), but does
-  // include libass, which is what powers this filter.
+  // Captions burned in via libass's `subtitles` filter, not `drawtext` —
+  // Vercel's bundled static FFmpeg has no drawtext ("No such filter"),
+  // but does include libass.
   //
-  // `fontsdir` points libass at a font file bundled directly in this
-  // repo (api/fonts/LiberationSans-Bold.ttf). Without this, captions
-  // render completely invisibly — Vercel's serverless environment has
-  // NO system fonts installed at all, so libass silently draws nothing
-  // rather than erroring.
-  //
-  // No `force_style` needed here — the style is already baked into the
-  // .ass file itself (see buildAss above).
+  // `fontsdir` points libass at the font bundled in this repo. Vercel's
+  // serverless environment ships NO system fonts, and libass silently
+  // draws nothing rather than erroring when it can't find one.
   parts.push("[vconcat]subtitles=" + assPath + ":fontsdir=" + fontsDir + "[vout]");
 
   return { filterComplex: parts.join(";"), finalLabel: "vout" };
 }
 
+/* ──────────────────────────────  HANDLER  ────────────────────────────── */
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
 
   if (req.method !== "POST") {
     res.status(405).json({ error: "Use POST" });
+    return;
+  }
+
+  // Kill switch. Set PIPELINE_ENABLED=false in Vercel to stop every
+  // render immediately, with no redeploy, if something starts burning
+  // quota or money unexpectedly.
+  if (process.env.PIPELINE_ENABLED === "false") {
+    res.status(503).json({ error: "Video pipeline is currently disabled" });
     return;
   }
 
@@ -279,17 +423,16 @@ export default async function handler(req, res) {
   }
 
   const pexelsKey = process.env.PEXELS_API_KEY;
-  // (Gemini keyword extraction removed — see getStockKeywords above.
-  // That call added a full network round-trip per render, which matters
-  // now that we're up against Vercel's 60s function limit.)
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!pexelsKey || !supabaseUrl || !serviceKey) {
-    res.status(500).json({
-      error: "Missing server config",
-      missing: { PEXELS_API_KEY: !pexelsKey, VITE_SUPABASE_URL: !supabaseUrl, SUPABASE_SERVICE_ROLE_KEY: !serviceKey },
+    console.error("[generate-video] missing config", {
+      PEXELS_API_KEY: !!pexelsKey,
+      VITE_SUPABASE_URL: !!supabaseUrl,
+      SUPABASE_SERVICE_ROLE_KEY: !!serviceKey,
     });
+    res.status(500).json({ error: "Server is not configured for video rendering" });
     return;
   }
 
@@ -298,7 +441,7 @@ export default async function handler(req, res) {
   const { data: job, error: fetchErr } = await supabase
     .from("video_jobs").select("*").eq("id", jobId).single();
   if (fetchErr || !job) {
-    res.status(404).json({ error: "Job not found: " + (fetchErr ? fetchErr.message : jobId) });
+    res.status(404).json({ error: "Job not found: " + jobId });
     return;
   }
   if (!job.audio_url) {
@@ -310,19 +453,20 @@ export default async function handler(req, res) {
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    await supabase.from("video_jobs").update({ status: "rendering", updated_at: new Date().toISOString() }).eq("id", jobId);
+    await supabase.from("video_jobs")
+      .update({ status: "rendering", updated_at: new Date().toISOString() })
+      .eq("id", jobId);
 
-    // 1) Real images matched to the story topic, AND 2) the narration
-    // audio — these two chains don't depend on each other at all, so
-    // running them at the same time (instead of one-after-another, as
-    // before) cuts real wall-clock time, which matters given Vercel's
-    // 60-second function limit on the free plan.
+    // Images and audio don't depend on each other, so fetch both at once —
+    // wall-clock time matters against Vercel's 60s function limit.
     const audioPath = path.join(workDir, "audio.mp3");
 
     const [imagePaths] = await Promise.all([
       (async () => {
-        const stockKeywords = getStockKeywords(headline, category);
-        const imageUrls = await fetchPexelsImages(stockKeywords, IMAGE_COUNT, pexelsKey, category);
+        const queries = getStockQueries(headline, category);
+        console.log("[generate-video] stock queries:", queries.join(" | "));
+        const imageUrls = await fetchPexelsImages(queries, IMAGE_COUNT, pexelsKey, category);
+        console.log("[generate-video] unique images fetched:", imageUrls.length);
         return Promise.all(imageUrls.map(async (url, i) => {
           const dest = path.join(workDir, "img" + i + ".jpg");
           await downloadToFile(url, dest);
@@ -332,14 +476,13 @@ export default async function handler(req, res) {
       downloadToFile(job.audio_url, audioPath),
     ]);
 
-    // 2b) Measure how long the narration ACTUALLY is — this is the fix
-    // for captions drifting out of sync. Everything below (caption
-    // timing, per-image duration, total video length) now derives from
-    // this real number instead of assuming a fixed 30 seconds.
+    // Real narration length — everything below (caption timing, per-image
+    // duration, total video length) derives from this rather than a fixed
+    // 30s assumption, which is what caused captions to drift on longer
+    // scripts.
     const realDuration = await getAudioDuration(audioPath);
+    const segmentSeconds = realDuration / imagePaths.length;
 
-    // 3) Build the FFmpeg filter graph: zoomed image sequence + burned-in
-    //    captions via a real .ass file (subtitles filter, not drawtext).
     const captionChunks = buildCaptionChunks(job.script || headline, realDuration);
     const assPath = path.join(workDir, "captions.ass");
     await fs.writeFile(assPath, buildAss(captionChunks), "utf8");
@@ -348,24 +491,26 @@ export default async function handler(req, res) {
 
     const outputPath = path.join(workDir, "output.mp4");
     const args = [];
-    imagePaths.forEach((p) => { args.push("-loop", "1", "-t", String(realDuration / imagePaths.length), "-i", p); });
+    imagePaths.forEach((p) => {
+      // -framerate pins the looped still to our timeline fps, so the
+      // input frame count is exactly segmentSeconds * FPS and lines up
+      // with the zoom ramp computed in buildFilterComplex.
+      args.push("-loop", "1", "-framerate", String(FPS), "-t", segmentSeconds.toFixed(3), "-i", p);
+    });
     args.push("-i", audioPath);
     args.push(
       "-filter_complex", filterComplex,
       "-map", "[" + finalLabel + "]",
       "-map", imagePaths.length + ":a",
       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+      "-r", String(FPS),
       "-c:a", "aac",
       "-shortest",
       "-y", outputPath
     );
 
-    // Run FFmpeg. If this throws "spawn ENOENT" or similar, ffmpeg-static's
-    // binary didn't get bundled correctly — see the honest flag at the
-    // top of this file for what that means and how to fall back.
     await execFileAsync(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 50 });
 
-    // 4) Upload the finished video to Supabase Storage.
     const videoBuffer = await fs.readFile(outputPath);
     const filePath = "video/" + jobId + ".mp4";
     const { error: uploadErr } = await supabase.storage
@@ -376,20 +521,18 @@ export default async function handler(req, res) {
     const { data: publicUrlData } = supabase.storage.from("media").getPublicUrl(filePath);
     const videoUrl = publicUrlData.publicUrl;
 
-    // 5) Done — no webhook needed, this whole thing just happened synchronously.
     await supabase.from("video_jobs")
       .update({ status: "done", video_url: videoUrl, updated_at: new Date().toISOString() })
       .eq("id", jobId);
 
-    res.status(200).json({ jobId, videoUrl, status: "done" });
+    res.status(200).json({ jobId, videoUrl, status: "done", imageCount: imagePaths.length });
   } catch (e) {
+    console.error("[generate-video] render failed:", e);
     await supabase.from("video_jobs")
-      .update({ status: "failed", error: String(e), updated_at: new Date().toISOString() })
+      .update({ status: "failed", error: String(e).slice(0, 500), updated_at: new Date().toISOString() })
       .eq("id", jobId);
-    res.status(500).json({ error: String(e) });
+    res.status(500).json({ error: "Video render failed" });
   } finally {
-    // Clean up /tmp regardless of outcome — Vercel's disk is ephemeral
-    // per-invocation anyway, but tidy exits matter under memory pressure.
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
