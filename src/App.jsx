@@ -114,6 +114,7 @@ function buildAppUser(supaUser) {
   const meta = supaUser.user_metadata || {};
   const email = supaUser.email;
   return {
+         id: supaUser.id,
     name: meta.full_name || meta.name || email,
     email,
     color: colorForEmail(email),
@@ -642,14 +643,15 @@ const db = {
   enabled() {
     return !!supabase;
   },
-  /** Fetch a user's persisted state; null when absent/disabled/failed. */
-  async loadUserData(email) {
-    if (!this.enabled()) return null;
+  /** Fetch a user's persisted state; null when absent/disabled/failed.
+      Keyed on auth.uid(), which is what the RLS select policy checks. */
+  async loadUserData(userId) {
+    if (!this.enabled() || !userId) return null;
     try {
       const { data, error } = await supabase
         .from("user_state")
         .select("data")
-        .eq("user_email", email)
+        .eq("user_id", userId)
         .maybeSingle();
       if (error) throw error;
       return data ? data.data : null;
@@ -658,13 +660,25 @@ const db = {
       return null;
     }
   },
-  /** Upsert the entire user state blob (called debounced from App). */
-  async saveUserData(email, data) {
-    if (!this.enabled()) return false;
+  /** Upsert the entire user state blob (called debounced from App).
+      user_id is mandatory — the RLS policies carry
+      `with check (auth.uid() = user_id)`, so a row without it is
+      rejected. onConflict targets user_id because that is the unique
+      index the migration created. */
+  async saveUserData(user, data) {
+    if (!this.enabled() || !user || !user.id) return false;
     try {
       const { error } = await supabase
         .from("user_state")
-        .upsert({ user_email: email, data, updated_at: new Date().toISOString() });
+        .upsert(
+          {
+            user_id: user.id,
+            user_email: user.email,
+            data,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id" }
+        );
       if (error) throw error;
       return true;
     } catch (e) {
@@ -672,15 +686,21 @@ const db = {
       return false;
     }
   },
-  /** Fire-and-forget event stream (quiz answers, watches, logins…). */
-  logEvent(email, event, payload) {
-    if (!this.enabled()) return;
+  /** Fire-and-forget event stream (quiz answers, watches, logins…).
+      No-ops without a real auth id — the demo sign-in chooser has no
+      auth.uid(), and firing these would just produce 403s. */
+  logEvent(user, event, payload) {
+    if (!this.enabled() || !user || !user.id) return;
     supabase
       .from("events")
-      .insert({ user_email: email || null, event, payload: payload || null })
+      .insert({
+        user_id: user.id,
+        user_email: user.email,
+        event,
+        payload: payload || null,
+      })
       .then(() => {});
   },
-};
 
 function userDataReducer(state, action) {
   switch (action.type) {
@@ -2926,7 +2946,7 @@ function App() {
   userRef.current = user;
   React.useEffect(() => {
     if (!user || !db.enabled()) return;
-    const t = setTimeout(() => db.saveUserData(user.email, userData), 800);
+        const t = setTimeout(() => db.saveUserData(user, userData), 800);
     return () => clearTimeout(t);
   }, [userData, user]);
 
@@ -2936,7 +2956,7 @@ function App() {
     dispatch(action);
     const u = userRef.current;
     if (u && (action.type === "VIDEO_WATCHED" || action.type === "LIKE_TOGGLED" || action.type === "SAVE_TOGGLED" || action.type === "QUIZ_COMPLETE")) {
-      db.logEvent(u.email, action.type, action.result || { storyId: action.storyId || (action.story && action.story.id) });
+      db.logEvent(u, action.type, action.result || { storyId: action.storyId || (action.story && action.story.id) });
     }
   }, []);
 
@@ -3015,10 +3035,10 @@ function App() {
     emailService.captureEmail(u.email, u.name, "google_signin"); // 🔌 Mailchimp/Resend
     /* 🔌 SUPABASE: pull this account's persisted state first, then run
        the LOGIN streak logic on top of it. Local-only if unconfigured. */
-    const saved = await db.loadUserData(u.email);
+    const saved = await db.loadUserData(u.id);
     if (saved) dispatch({ type: "HYDRATE", data: saved });
     dispatch({ type: "LOGIN" });
-    db.logEvent(u.email, "LOGIN", { at: new Date().toISOString() });
+    db.logEvent(u, "LOGIN", { at: new Date().toISOString() });
     toast("Signed in as " + u.name.split(" ")[0], "check");
   }, [toast]);
 
