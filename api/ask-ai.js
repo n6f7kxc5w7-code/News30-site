@@ -26,7 +26,14 @@
 //   POST /api/ask-ai   body: { system, messages, useWebSearch, model? }
 //   → { text: "..." } on success, { error: "..." } on failure.
 
-const DEFAULT_MODEL = "gemini-2.0-flash";
+// Gemini 2.0 Flash and 2.0 Flash-Lite were shut down on 1 June 2026 and
+// now return 404 — do not put them back. 2.5 Flash-Lite is Google's
+// recommended replacement and the cheapest capable option, which suits
+// the short summaries and answers this endpoint produces.
+// Model retirements have broken this project twice now; worth checking
+// https://ai.google.dev/gemini-api/docs/models periodically rather than
+// finding out through a 404 in production.
+const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // Only these origins may call this endpoint. Add Vercel preview URLs here
@@ -40,8 +47,8 @@ const ALLOWED_ORIGINS = [
 // Models the client is permitted to request. Prevents someone pointing an
 // arbitrary/expensive model at your key via the optional `model` field.
 const ALLOWED_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
 ];
 
 export default async function handler(req, res) {
