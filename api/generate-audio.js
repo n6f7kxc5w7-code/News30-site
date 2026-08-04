@@ -40,7 +40,12 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-const GEMINI_MODEL = "gemini-2.0-flash";
+// Gemini 2.0 Flash and 2.0 Flash-Lite were shut down on 1 June 2026 and
+// now return 404 — do not put them back. 2.5 Flash-Lite is Google's
+// recommended replacement and the cheapest capable option; the work here
+// (a 70-word script plus three search phrases) needs speed and low cost
+// far more than deep reasoning.
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent";
 
