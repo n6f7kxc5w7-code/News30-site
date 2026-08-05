@@ -542,6 +542,45 @@ export default async function handler(req, res) {
 
     await execFileAsync(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 50 });
 
+    // ── Thumbnail ───────────────────────────────────────────────────
+    // Grabbed from the finished video rather than reusing a Pexels
+    // image, for three reasons: it is guaranteed to match what actually
+    // plays, it already carries the Ken Burns crop and burned-in
+    // caption so the card previews the real thing, and it sidesteps any
+    // question about republishing a stock image as cover art.
+    //
+    // Taken ~1.5s in — far enough past the first frame to have zoomed
+    // slightly and to usually have a caption on screen.
+    const thumbPath = path.join(workDir, "thumb.jpg");
+    let thumbnailUrl = null;
+    try {
+      await execFileAsync(ffmpegPath, [
+        "-ss", "1.5",
+        "-i", outputPath,
+        "-frames:v", "1",
+        "-q:v", "3",
+        "-y", thumbPath,
+      ]);
+
+      const thumbBuffer = await fs.readFile(thumbPath);
+      const thumbFilePath = "thumb/" + jobId + ".jpg";
+      const { error: thumbErr } = await supabase.storage
+        .from("media")
+        .upload(thumbFilePath, thumbBuffer, { contentType: "image/jpeg", upsert: true });
+
+      if (thumbErr) {
+        // A missing thumbnail is a cosmetic problem; a missing video is
+        // not. Never fail the render over cover art — the front end
+        // falls back to generated artwork.
+        console.error("[generate-video] thumbnail upload failed:", thumbErr);
+      } else {
+        const { data: thumbUrlData } = supabase.storage.from("media").getPublicUrl(thumbFilePath);
+        thumbnailUrl = thumbUrlData.publicUrl;
+      }
+    } catch (e) {
+      console.error("[generate-video] thumbnail extraction failed:", e);
+    }
+
     const videoBuffer = await fs.readFile(outputPath);
     const filePath = "video/" + jobId + ".mp4";
     const { error: uploadErr } = await supabase.storage
@@ -553,10 +592,22 @@ export default async function handler(req, res) {
     const videoUrl = publicUrlData.publicUrl;
 
     await supabase.from("video_jobs")
-      .update({ status: "done", video_url: videoUrl, updated_at: new Date().toISOString() })
+      .update({
+        status: "done",
+        video_url: videoUrl,
+        thumbnail_url: thumbnailUrl,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", jobId);
 
-    res.status(200).json({ jobId, videoUrl, status: "done", imageCount: imagePaths.length });
+    res.status(200).json({
+      jobId,
+      videoUrl,
+      thumbnailUrl,
+      durationSeconds: Number(realDuration.toFixed(2)),
+      status: "done",
+      imageCount: imagePaths.length,
+    });
   } catch (e) {
     console.error("[generate-video] render failed:", e);
     await supabase.from("video_jobs")
