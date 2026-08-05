@@ -1,6 +1,6 @@
 /* ════════════════════════════════════════════════════════════════════
    NEWS30 — AI-powered news platform (pre-alpha production build)
-   Single-file React app · YouTube-parity layout · Desktop + iPhone,
+   Single-file React app · YouTube-parity layout · Desktop + iPhone
 
    ── CONNECTION POINT INDEX (search for "🔌") ─────────────────────────
    🔌 AI API        → CONFIG.AI + callAI() · Gemini   (Ask AI, Summary chat, Simplify)
