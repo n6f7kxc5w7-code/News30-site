@@ -103,6 +103,18 @@ export async function checkRateLimit(bucket, key, limit, windowMins) {
  * proceed.
  */
 export async function enforceRateLimit(req, res, bucket, limit, windowMins) {
+  // The cron worker legitimately fires nine renders in a few minutes,
+  // which is exactly the pattern this limiter exists to block. It
+  // authenticates with CRON_SECRET, so it is exempt.
+  //
+  // Note this is a shared secret, not per-user auth: anyone holding
+  // CRON_SECRET can bypass every limit here. It lives only in Vercel's
+  // environment variables and must never reach client code.
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers["x-pipeline-secret"] === secret) {
+    return true;
+  }
+
   const key = callerKey(req);
   const result = await checkRateLimit(bucket, key, limit, windowMins);
 
