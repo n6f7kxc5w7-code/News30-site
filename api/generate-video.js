@@ -59,6 +59,7 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 import ffmpegPath from "ffmpeg-static";
+import { enforceRateLimit } from "./_rate-limit.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -428,6 +429,11 @@ export default async function handler(req, res) {
     res.status(503).json({ error: "Video pipeline is currently disabled" });
     return;
   }
+
+  // Rendering is the most expensive and slowest operation in the stack,
+  // so this doubles as protection against concurrent renders piling up
+  // against Vercel's function time limit.
+  if (!(await enforceRateLimit(req, res, "generate-video", 5, 60))) return;
 
   const { jobId, headline, category } = req.body || {};
   if (!jobId || !headline) {
