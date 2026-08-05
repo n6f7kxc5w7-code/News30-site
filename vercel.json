@@ -1,9 +1,21 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/ingest",
+      "schedule": "0 6,12,18 * * *"
+    }
+  ],
   "functions": {
     "api/generate-video.js": {
       "maxDuration": 60,
       "includeFiles": "{node_modules/ffmpeg-static/**,api/LiberationSans-Bold.ttf}"
+    },
+    "api/cron/process.js": {
+      "maxDuration": 60
+    },
+    "api/cron/ingest.js": {
+      "maxDuration": 30
     }
   }
 }
