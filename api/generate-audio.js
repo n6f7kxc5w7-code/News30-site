@@ -39,6 +39,7 @@
 // Reuses VITE_SUPABASE_URL (just the project URL, not a secret).
 
 import { createClient } from "@supabase/supabase-js";
+import { enforceRateLimit } from "./_rate-limit.js";
 
 // Gemini 2.0 Flash and 2.0 Flash-Lite were shut down on 1 June 2026 and
 // now return 404 — do not put them back. 2.5 Flash-Lite is Google's
@@ -191,6 +192,10 @@ export default async function handler(req, res) {
     res.status(503).json({ error: "Pipeline is currently disabled" });
     return;
   }
+
+  // Much tighter than ask-ai: every call spends Gemini AND Fish Audio
+  // credits, and narration is billed per character of script.
+  if (!(await enforceRateLimit(req, res, "generate-audio", 5, 60))) return;
 
   // Two accepted call shapes:
   //   { storyId, script }                       — script supplied (test harness)
