@@ -33,6 +33,8 @@
 // Model retirements have broken this project twice now; worth checking
 // https://ai.google.dev/gemini-api/docs/models periodically rather than
 // finding out through a 404 in production.
+import { enforceRateLimit } from "./_rate-limit.js";
+
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -69,6 +71,12 @@ export default async function handler(req, res) {
     res.status(405).json({ error: "Use POST" });
     return;
   }
+
+  // 30 questions per IP per hour. Someone reading and asking follow-ups
+  // will never come close; a script hits it in seconds. CORS restricts
+  // browsers on other origins but does nothing about direct requests,
+  // so this is what actually caps the spend.
+  if (!(await enforceRateLimit(req, res, "ask-ai", 30, 60))) return;
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
