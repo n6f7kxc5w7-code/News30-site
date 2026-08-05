@@ -1,4 +1,4 @@
-// /api/cron/ingest.jsm
+// /api/cron/ingest.js
 // 🗞 STAGE 1 OF THE AUTOMATED PIPELINE — decides what is worth making
 // a video about, and queues it.
 //
