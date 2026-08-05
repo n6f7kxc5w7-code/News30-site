@@ -1,249 +1,205 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>News30 — Pipeline Test</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #0f0f0f; color: #f1f1f1; font-family: -apple-system, Roboto, sans-serif; padding: 24px 16px; }
-  .wrap { max-width: 640px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  p.sub { color: #aaa; font-size: 13px; margin: 0 0 24px; }
-  .card { background: #1a1a1a; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-  label { font-size: 12px; color: #aaa; display: block; margin-bottom: 4px; }
-  input, select, textarea { width: 100%; background: #0f0f0f; border: 1px solid #333; border-radius: 8px; padding: 10px 12px; color: #fff; font-size: 14px; margin-bottom: 12px; font-family: inherit; }
-  textarea { resize: vertical; }
-  button { width: 100%; padding: 12px 16px; border-radius: 10px; border: none; cursor: pointer; background: #3ea6ff; color: #04182b; font-weight: 700; font-size: 14px; margin-bottom: 12px; }
-  button:disabled { background: #2a2a2a; color: #666; cursor: default; }
-  .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #fff; background: #666; }
-  .meta { font-size: 12px; color: #aaa; margin-bottom: 8px; }
-  audio, video { width: 100%; border-radius: 8px; margin-top: 4px; }
-  #log { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
-  .logline { font-size: 12.5px; color: #ccc; font-family: monospace; }
-  .logtime { color: #666; }
-  .modes { display: flex; gap: 8px; margin-bottom: 14px; }
-  .modes button { margin: 0; background: #2a2a2a; color: #bbb; font-weight: 600; }
-  .modes button.active { background: #3ea6ff; color: #04182b; }
-  .hint { font-size: 12px; color: #888; margin: -4px 0 12px; line-height: 1.45; }
-  .queries { font-size: 12.5px; color: #8fd19e; font-family: monospace; margin-top: 6px; word-break: break-word; }
-  .hidden { display: none; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>News30 — Video Pipeline Test</h1>
-  <p class="sub">Runs on news30.live itself, so there's no cross-origin issue — same domain calling its own API.</p>
+# Automated pipeline — setup
 
-  <div class="card">
-    <label>Script source</label>
-    <div class="modes">
-      <button id="modeAi" class="active">Generate with AI</button>
-      <button id="modeManual">Write it myself</button>
-    </div>
-    <p class="hint" id="modeHint">
-      Sends only the headline. Gemini writes the script <em>and</em> picks three
-      stock-photo search phrases in the same call — this is the path that
-      produces relevant images. Watch for
-      <code>queries (gemini)</code> in the Vercel logs.
-    </p>
+Turns News30 from "the feed is whatever NewsAPI returned this second" into
+"the feed is nine curated stories we have made videos for."
 
-    <label>Headline</label>
-    <input id="headline" value="EU leaders strike provisional deal on joint defence fund">
+```
+Vercel Cron (3×/day)
+      ↓
+/api/cron/ingest      fetch 40 headlines per category, rank by significance,
+                      write top 3 per category to published_stories as pending
+      ↓
+/api/cron/process     take ONE pending story → script → narration → render
+                      → thumbnail → mark ready → call itself for the next
+      ↓
+website               reads published_stories where status = 'ready'
+```
 
-    <label>Category</label>
-    <select id="category">
-      <option value="geopolitics">Geopolitics</option>
-      <option value="finance">Finance</option>
-      <option value="sports">Sports</option>
-    </select>
+---
 
-    <div id="scriptWrap" class="hidden">
-      <label>Script</label>
-      <textarea id="script" rows="4">Your news in 30 seconds. EU leaders just struck a provisional deal on a joint defence fund after an overnight summit. The agreement still needs approval from national parliaments before it takes effect. Financing details between member states remain unresolved. More on this as ratification votes begin across Europe.</textarea>
-    </div>
-  </div>
+## Step 1 — Database
 
-  <button id="btnAudio">Step 1 — Generate audio</button>
-  <button id="btnVideo" disabled>Step 2 — Generate video</button>
+Run `published-stories-table.sql` in Supabase → SQL editor.
 
-  <div class="card">
-    <div class="row">
-      <strong>Status</strong>
-      <span class="pill" id="statusPill">not started</span>
-    </div>
-    <div class="meta" id="jobMeta"></div>
-    <div id="scriptBox"></div>
-    <div id="audioBox"></div>
-    <div id="videoBox"></div>
-  </div>
+Then add the thumbnail column to the existing render ledger:
 
-  <div class="card">
-    <strong>Log</strong>
-    <div id="log" style="margin-top:8px;"></div>
-  </div>
-</div>
+```sql
+alter table video_jobs add column if not exists thumbnail_url text;
+```
 
-<script>
-  let jobId = null, audioUrl = null, pollTimer = null;
-  let mode = 'ai'; // 'ai' | 'manual'
+## Step 2 — Environment variable
 
-  const AI_HINT =
-    'Sends only the headline. Gemini writes the script <em>and</em> picks three ' +
-    'stock-photo search phrases in the same call — this is the path that produces ' +
-    'relevant images. Watch for <code>queries (gemini)</code> in the Vercel logs.';
+Vercel → Settings → Environment Variables. Add:
 
-  const MANUAL_HINT =
-    'Sends your script as-is and skips Gemini entirely. No image queries are ' +
-    'produced, so generate-video falls back to the hardcoded keyword map — you\'ll ' +
-    'see <code>queries (keyword map)</code> in the logs and generic photos. Useful ' +
-    'for isolating TTS or FFmpeg problems without spending a Gemini call.';
+```
+CRON_SECRET = <a long random string>
+```
 
-  function setMode(next) {
-    mode = next;
-    document.getElementById('modeAi').classList.toggle('active', next === 'ai');
-    document.getElementById('modeManual').classList.toggle('active', next === 'manual');
-    document.getElementById('scriptWrap').classList.toggle('hidden', next === 'ai');
-    document.getElementById('modeHint').innerHTML = next === 'ai' ? AI_HINT : MANUAL_HINT;
-  }
+Generate one however you like — 40+ random characters. This is what stops
+anyone triggering a full render cycle by visiting the URL, and what lets the
+worker bypass its own rate limits. Treat it like any other secret: no `VITE_`
+prefix, never in client code.
 
-  document.getElementById('modeAi').addEventListener('click', () => setMode('ai'));
-  document.getElementById('modeManual').addEventListener('click', () => setMode('manual'));
+## Step 3 — Files
 
-  function addLog(line) {
-    const el = document.getElementById('log');
-    const time = new Date().toLocaleTimeString();
-    const div = document.createElement('div');
-    div.className = 'logline';
-    div.innerHTML = '<span class="logtime">' + time + '</span> — ' + line;
-    el.appendChild(div);
-    el.scrollTop = el.scrollHeight;
-  }
+**New:**
+- `api/cron/ingest.js` — paste `ingest.js`
+- `api/cron/process.js` — paste `process.js`
 
-  function setStatus(s) {
-    const pill = document.getElementById('statusPill');
-    pill.textContent = s || 'not started';
-    pill.style.background = s === 'done' ? '#2ba640' : s === 'failed' ? '#ff4e45' : s ? '#3ea6ff' : '#666';
-  }
+**Replace:**
+- `api/_rate-limit.js` — now honours the internal bypass
+- `api/generate-video.js` — now produces a thumbnail
+- `vercel.json` — cron schedule and function timeouts
 
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, (c) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
-  }
+If your existing `vercel.json` has settings beyond `functions`, merge rather
+than overwrite: keep what is there and add the `crons` block.
 
-  document.getElementById('btnAudio').addEventListener('click', async () => {
-    const btn = document.getElementById('btnAudio');
-    btn.disabled = true;
-    btn.textContent = mode === 'ai' ? 'Writing script + generating audio…' : 'Generating audio…';
-    addLog('Calling /api/generate-audio (' + mode + ' mode) ...');
+## Step 4 — Deploy, then test manually before trusting the schedule
+
+Trigger ingest by hand first. From a terminal, or any HTTP client:
+
+```
+curl -X POST https://news30.live/api/cron/ingest \
+  -H "Authorization: Bearer YOUR_CRON_SECRET"
+```
+
+Then watch two places:
+
+- **Supabase → Table Editor → published_stories.** Nine rows should appear as
+  `pending`, then move through `generating` to `ready` one at a time.
+- **Vercel → Logs.** `[ingest]` lines show what was picked and why;
+  `[process]` lines show each render.
+
+Expect the full queue to take several minutes — each render is a real FFmpeg
+job.
+
+---
+
+## Step 5 — Front end
+
+The app currently builds its feed from NewsAPI directly. It needs to read
+finished stories instead.
+
+Add this service near `newsService` in `App.jsx`:
+
+```js
+/* 🔌 PUBLISHED STORIES — the real feed. Reads only rows the pipeline
+   has finished rendering; the RLS policy enforces the same condition
+   server-side, so an unfinished story cannot leak even if this query
+   were wrong. */
+const publishedService = {
+  async load() {
+    if (!supabase) return [];
     try {
-      const headline = document.getElementById('headline').value;
-      const category = document.getElementById('category').value;
-
-      // AI mode omits `script` entirely — that's what triggers the Gemini
-      // path in generate-audio.js. Sending a script always wins, which is
-      // exactly why manual mode never produced image queries.
-      const payload = { storyId: 'test-' + Date.now(), headline, category };
-      if (mode === 'manual') payload.script = document.getElementById('script').value;
-
-      const r = await fetch('/api/generate-audio', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || ('Request failed: ' + r.status));
-
-      jobId = data.jobId;
-      audioUrl = data.audioUrl;
-      addLog('✅ Audio ready. Job id: ' + jobId);
-      document.getElementById('jobMeta').textContent = 'Job id: ' + jobId;
-
-      let scriptHtml = '';
-      if (data.script) {
-        scriptHtml += '<div class="meta">Script used:</div>' +
-          '<div class="logline">' + escapeHtml(data.script) + '</div>';
-      }
-      if (data.imageQueries && data.imageQueries.length) {
-        addLog('🖼 Image queries from Gemini: ' + data.imageQueries.join(' | '));
-        scriptHtml += '<div class="meta" style="margin-top:8px;">Image queries:</div>' +
-          '<div class="queries">' + escapeHtml(data.imageQueries.join('  |  ')) + '</div>';
-      } else {
-        addLog('⚠️ No image queries returned — generate-video will fall back to the keyword map.');
-      }
-      document.getElementById('scriptBox').innerHTML = scriptHtml;
-
-      document.getElementById('audioBox').innerHTML =
-        '<div class="meta" style="margin-top:8px;">Narration audio:</div><audio controls src="' + audioUrl + '"></audio>';
-      document.getElementById('btnVideo').disabled = false;
+      const { data, error } = await supabase
+        .from("published_stories")
+        .select("*")
+        .eq("status", "ready")
+        .order("category", { ascending: true })
+        .order("slot", { ascending: true });
+      if (error) throw error;
+      return (data || []).map(mapPublished);
     } catch (e) {
-      addLog('❌ ' + e.message);
+      track("published_load_failed", { error: String(e) });
+      return [];
     }
-    btn.disabled = false;
-    btn.textContent = 'Step 1 — Generate audio';
-  });
+  },
+};
 
-  document.getElementById('btnVideo').addEventListener('click', async () => {
-    if (!jobId) { addLog('⚠️ Run step 1 first.'); return; }
-    const btn = document.getElementById('btnVideo');
-    btn.disabled = true; btn.textContent = 'Rendering…';
-    addLog('Calling /api/generate-video ...');
-    try {
-      const headline = document.getElementById('headline').value;
-      const category = document.getElementById('category').value;
-      const r = await fetch('/api/generate-video', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, headline, category }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || ('Request failed: ' + r.status));
+/* Maps a published_stories row onto the story shape the whole UI
+   already consumes, so cards, player, panels and deep links work
+   unchanged. */
+function mapPublished(row) {
+  const seed = hash(row.id);
+  return {
+    id: row.id,
+    category: row.category,
+    headline: row.headline,
+    kicker: (LIVE_KICKERS[row.category] || ["NEWS"])[seed % 4],
+    source: row.source || "Newswire",
+    bias: OUTLET_BIAS[(row.source || "").toLowerCase()] || "centre",
+    fact: "verified",
+    publishedAt: Date.parse(row.article_published) || Date.now(),
+    duration: fmtDur(Math.round(row.duration_seconds || 30)),
+    durationSec: Math.round(row.duration_seconds || 30),
+    views: 0,
+    seed,
+    videoUrl: row.video_url,
+    thumbnailUrl: row.thumbnail_url,
+    script: row.script,
+    slot: row.slot,
+  };
+}
+```
 
-      setStatus(data.status);
-      if (data.imageCount) addLog('🖼 Unique images used: ' + data.imageCount);
+Then in `App()`, load it on mount alongside the existing news load, and prefer
+published stories when any exist.
 
-      if (data.videoUrl) {
-        addLog('🎉 Video finished: ' + data.videoUrl);
-        document.getElementById('videoBox').innerHTML =
-          '<div class="meta">Finished video:</div><video controls src="' + data.videoUrl + '"></video>';
-      } else {
-        addLog('Polling every 5s for completion ...');
-        startPolling();
-      }
-    } catch (e) {
-      addLog('❌ ' + e.message);
-    }
-    btn.disabled = false; btn.textContent = 'Step 2 — Generate video';
-  });
+**Thumbnails.** In `StoryCard`, use the real thumbnail when present and fall
+back to the generated artwork when not — a failed thumbnail upload should not
+produce an empty card:
 
-  function startPolling() {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      try {
-        const r = await fetch('/api/job-status?jobId=' + jobId);
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'status check failed');
-        setStatus(data.status);
-        if (data.status === 'done') {
-          addLog('🎉 Video finished: ' + data.video_url);
-          document.getElementById('videoBox').innerHTML =
-            '<div class="meta">Finished video:</div><video controls src="' + data.video_url + '"></video>';
-          clearInterval(pollTimer);
-        } else if (data.status === 'failed') {
-          addLog('❌ Render failed: ' + (data.error || 'unknown error'));
-          clearInterval(pollTimer);
-        } else {
-          addLog('… still ' + data.status);
-        }
-      } catch (e) {
-        addLog('⚠️ Poll error: ' + e.message);
-      }
-    }, 5000);
-  }
+```jsx
+      <div className="thumb">
+        {story.thumbnailUrl
+          ? <img src={story.thumbnailUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          : <ThumbArt story={story} />}
+        <span className="badge-date">{dateBadge(story.publishedAt)}</span>
+        <span className="badge-dur">{story.duration}</span>
+      </div>
+```
 
-  setMode('ai');
-</script>
-</body>
-</html>
+**Playback.** `Player` currently animates artwork on a simulated clock. When
+`story.videoUrl` exists it should render a real `<video>` element instead, and
+drive progress from the element's own `timeupdate` rather than the interval.
+That is the one non-trivial front-end change — worth doing as its own step once
+the backend is confirmed working.
+
+---
+
+## Schedule
+
+`0 6,12,18 * * *` — 06:00, 12:00 and 18:00 UTC. Three refreshes a day, nine
+videos each.
+
+**Check your Vercel plan's cron limits before relying on this.** Hobby
+historically restricted cron frequency, and if only one run per day is allowed
+the schedule silently becomes daily. The self-chaining worker is unaffected —
+it is what makes nine renders possible from a single trigger — but you would
+get one refresh a day rather than three.
+
+To change frequency, edit the `schedule` field. `0 */6 * * *` is every six
+hours; `0 7 * * *` is once daily at 07:00 UTC.
+
+---
+
+## Cost
+
+Per cycle: 9 Gemini calls (~70 words each), 9 Fish Audio narrations, ~27–45
+Pexels fetches, 9 FFmpeg renders on Vercel compute.
+
+Three cycles a day is 27 videos daily. Against a £50/month ceiling the variable
+to watch is Fish Audio, billed per character — roughly 70 words × 27 videos ×
+30 days. Worth checking that arithmetic against their live pricing before
+leaving three-a-day running unattended, and dropping to one cycle daily if it
+looks tight.
+
+`PIPELINE_ENABLED=false` stops everything instantly without a redeploy.
+
+---
+
+## What to watch on the first live run
+
+**Ranking quality.** The `rank_reason` column records why each story was
+chosen. Read it against what actually got picked. If the choices look wrong,
+the weights in `rankStories` are the dial — corroboration is currently heaviest
+at up to 50 points, recency up to 25.
+
+**Clustering threshold.** `SAME_STORY_THRESHOLD = 0.28` decides whether two
+headlines describe the same event. Too low and unrelated stories merge, hiding
+real news. Too high and one event fills all three slots. Check whether the
+three stories in a category are genuinely three different events.
+
+**Failed rows.** Anything sitting at `status = 'failed'` has its reason in
+`error`. Two attempts then it stops trying, deliberately — a broken story
+should not consume the day's budget.
