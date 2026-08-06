@@ -1,6 +1,6 @@
 // /api/cron/process.js
 // 🎬 STAGE 2 OF THE AUTOMATED PIPELINE — turns one queued story into a
-// finished, published video..
+// finished, published video.
 //
 // Handles exactly ONE story per invocation, then calls itself for the
 // next. That design is forced by Vercel's function time limit: nine
