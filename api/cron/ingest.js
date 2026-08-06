@@ -1,6 +1,6 @@
 // /api/cron/ingest.js
 // 🗞 STAGE 1 OF THE AUTOMATED PIPELINE — decides what is worth making
-// a video about, and queues it.
+// a video about, and queues it..
 //
 // Runs on a schedule (see vercel.json). Does NOT render anything: it
 // fetches headlines, works out which stories are actually significant,
