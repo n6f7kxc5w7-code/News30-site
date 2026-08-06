@@ -1,7 +1,7 @@
 // /api/_rate-limit.js
 // 🔒 SHARED RATE LIMITER — protects the paid endpoints from being
 // scripted. Imported by ask-ai.js, generate-audio.js and
-// generate-video.js..
+// generate-video.js.
 //
 // WHY THIS EXISTS: /api/ask-ai is a public endpoint that spends money
 // on every call. A single Gemini call costs a fraction of a penny, so
