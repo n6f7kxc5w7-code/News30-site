@@ -1,6 +1,6 @@
 // /api/generate-video.js
 // 🔌 STEP 3 OF THE VIDEO PIPELINE — FFmpeg version (free, self-hosted).
-// Downloads real Pexels images + the Fish Audio narration into /tmp,
+// Downloads real Pexels images + the Fish Audio narration into /tmp,.
 // uses FFmpeg (via ffmpeg-static) to assemble a 720x1280 video with a
 // gentle Ken Burns zoom per image and burned-in captions, muxes in the
 // narration, then uploads the finished MP4 to Supabase Storage.
