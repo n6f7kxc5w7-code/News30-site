@@ -1,5 +1,44 @@
-import { createClient } from "@supabase/supabase-js";
+// /api/cron/ingest.js
+// 🗞 STAGE 1 OF THE AUTOMATED PIPELINE — decides what is worth making
+// a video about, and queues it.
+//
+// Runs on a schedule (see vercel.json). Does NOT render anything: it
+// fetches headlines, works out which stories are actually significant,
+// writes the top three per category into published_stories as
+// `pending`, then kicks the worker. Selection is fast; rendering is
+// slow. Keeping them in separate functions is what makes the whole
+// thing fit inside Vercel's execution limit.
+//
+// ─── HOW "BIG STORY" IS DECIDED, WITHOUT AI ──────────────────────
+// The instinct is to ask a model "is this important?" That is slow,
+// costs money on every headline, and a model's guess about importance
+// is just a guess. There is a better signal sitting in the data.
+//
+// CORROBORATION. If Reuters, AP and the BBC are all running the same
+// story, it is significant — newsrooms have already made that judgement
+// independently, and their agreement is evidence about the world rather
+// than an opinion about it. A story only one outlet carries is usually
+// either minor or a puff piece. This is the heaviest weighted signal.
+//
+// SOURCE TIER. Wire services and major outlets break real news; content
+// farms republish it. A story led by Reuters starts ahead of one led by
+// an aggregator.
+//
+// RECENCY. News decays. A six-hour-old story competes poorly against
+// one from twenty minutes ago, all else equal.
+//
+// FEED POSITION. NewsAPI already sorts top-headlines by its own
+// relevance model. Ignoring that entirely would be throwing away free
+// information, so it contributes a small amount.
+//
+// SOFT-NEWS PENALTY. Listicles, celebrity items and "you won't believe"
+// headlines score badly regardless of corroboration.
+//
+// Security: this endpoint spends money, so it requires CRON_SECRET.
+// Vercel Cron sends it automatically as a bearer token; anyone else
+// calling the URL gets a 401.
 
+import { createClient } from "@supabase/supabase-js";
 
 const CATEGORY_MAP = {
   geopolitics: "general",
@@ -8,8 +47,10 @@ const CATEGORY_MAP = {
 };
 
 const STORIES_PER_CATEGORY = 3;
-const HEADLINES_TO_CONSIDER = 40;
+const HEADLINES_TO_CONSIDER = 40; // pool per category before ranking
 
+// Outlets that break stories rather than repackage them. Anything
+// unlisted scores 1 — unknown, not penalised.
 const SOURCE_TIER = {
   reuters: 5, "associated press": 5, ap: 5, "agence france-presse": 5, afp: 5,
   "bbc news": 4, bbc: 4, bloomberg: 4, "financial times": 4, ft: 4,
@@ -20,6 +61,7 @@ const SOURCE_TIER = {
   cnn: 3, "abc news": 3, "cbs news": 3, "nbc news": 3,
 };
 
+// Headline shapes that signal soft news whatever the corroboration.
 const SOFT_NEWS_PATTERNS = [
   /\b\d+\s+(things|ways|reasons|times|photos|celebrities)\b/i,
   /\byou won'?t believe\b/i, /\bhere'?s (why|what|how)\b/i,
@@ -28,6 +70,7 @@ const SOFT_NEWS_PATTERNS = [
   /\bnetflix\b.*\bwatch\b/i, /\brecipe\b/i,
 ];
 
+// Words too common to indicate two articles are about the same event.
 const STOPWORDS = new Set([
   "the","a","an","and","or","but","in","on","at","to","for","of","with","by",
   "from","as","is","are","was","were","be","been","has","have","had","will",
@@ -46,6 +89,10 @@ function tokenize(title) {
   );
 }
 
+// Jaccard similarity. Two headlines about the same event share their
+// distinctive nouns even when worded completely differently:
+// "EU leaders agree defence fund" vs "European Union strikes deal on
+// joint defence financing" overlap on leaders/defence/fund.
 function similarity(aTokens, bTokens) {
   if (!aTokens.size || !bTokens.size) return 0;
   let shared = 0;
@@ -63,11 +110,19 @@ function isSoftNews(headline) {
   return SOFT_NEWS_PATTERNS.some((re) => re.test(headline || ""));
 }
 
+/**
+ * Ranks a category's headlines and returns the top N.
+ *
+ * Clusters near-duplicate headlines first, so the three chosen stories
+ * are three different events rather than three write-ups of one. That
+ * clustering does double duty: cluster size IS the corroboration count.
+ */
 function rankStories(articles, limit) {
   const usable = articles.filter(
     (a) => a && a.title && a.title !== "[Removed]" && a.url
   );
 
+  // Cluster by headline similarity.
   const clusters = [];
   usable.forEach((article, feedIndex) => {
     const tokens = tokenize(article.title);
@@ -76,6 +131,8 @@ function rankStories(articles, limit) {
     for (const cluster of clusters) {
       if (similarity(tokens, cluster.tokens) >= SAME_STORY_THRESHOLD) {
         cluster.members.push({ article, feedIndex });
+        // Keep the highest-tier outlet as the cluster's representative:
+        // Reuters' wording of an event beats an aggregator's rewrite.
         if (sourceTier(article.source && article.source.name) >
             sourceTier(cluster.lead.article.source && cluster.lead.article.source.name)) {
           cluster.lead = { article, feedIndex };
@@ -95,25 +152,33 @@ function rankStories(articles, limit) {
   const scored = clusters.map((cluster) => {
     const { article, feedIndex } = cluster.lead;
 
+    // Distinct outlets, not distinct articles — one outlet filing three
+    // updates is not three newsrooms agreeing.
     const outlets = new Set(
       cluster.members.map((m) => ((m.article.source && m.article.source.name) || "").toLowerCase())
     );
     const corroboration = outlets.size;
 
+    // Heaviest signal. Sub-linear so a 12-outlet story doesn't
+    // permanently crowd out everything else.
     const corroborationScore = Math.min(50, Math.round(18 * Math.log2(corroboration + 1)));
 
+    // Best outlet in the cluster, not just the lead.
     const bestTier = Math.max(
       ...cluster.members.map((m) => sourceTier(m.article.source && m.article.source.name))
     );
     const tierScore = bestTier * 5;
 
+    // Roughly halves every 8 hours.
     const ageHours = Math.max(0, (now - (Date.parse(article.publishedAt) || now)) / 3600000);
     const recencyScore = Math.round(25 * Math.pow(0.5, ageHours / 8));
 
+    // NewsAPI's own ordering, small weight.
     const positionScore = Math.max(0, 10 - feedIndex);
 
     const softPenalty = isSoftNews(article.title) ? -40 : 0;
 
+    // Headlines under ~5 words are usually teasers with no substance.
     const brevityPenalty = tokenize(article.title).size < 4 ? -15 : 0;
 
     const significance =
@@ -136,23 +201,15 @@ function rankStories(articles, limit) {
 }
 
 export default async function handler(req, res) {
+  // Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. Without
+  // this check the URL is public and anyone could trigger a full render
+  // cycle at will.
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     console.error("[ingest] CRON_SECRET not configured — refusing to run");
     res.status(500).json({ error: "Not configured" });
     return;
   }
-
-  // TEMPORARY DEBUG — remove once the 401 mismatch is resolved. Logs
-  // only lengths and first/last characters, never the secret itself,
-  // so this is safe to leave in Vercel's logs briefly.
-  const incoming = req.headers.authorization || "";
-  console.log("[DEBUG] stored secret length:", secret.length);
-  console.log("[DEBUG] stored secret starts/ends:", secret.slice(0, 4) + "..." + secret.slice(-4));
-  console.log("[DEBUG] incoming header length:", incoming.length);
-  console.log("[DEBUG] incoming header starts/ends:", incoming.slice(0, 11) + "..." + incoming.slice(-4));
-  console.log("[DEBUG] expected header length:", ("Bearer " + secret).length);
-
   if (req.headers.authorization !== "Bearer " + secret) {
     res.status(401).json({ error: "Unauthorized" });
     return;
@@ -198,6 +255,7 @@ export default async function handler(req, res) {
         top.map((t) => t.significance + " — " + t.article.title.slice(0, 60)).join(" | ")
       );
 
+      // Slot 1 is the lead story for the category.
       const rows = top.map((t, i) => ({
         article_url: t.article.url,
         category,
@@ -211,6 +269,9 @@ export default async function handler(req, res) {
         slot: i + 1,
       }));
 
+      // ignoreDuplicates means a story already queued or published stays
+      // as it is — this cron runs repeatedly and must not re-render
+      // yesterday's news or reset a row mid-generation.
       const { error } = await supabase
         .from("published_stories")
         .upsert(rows, { onConflict: "article_url", ignoreDuplicates: true });
@@ -219,11 +280,48 @@ export default async function handler(req, res) {
       summary[category] = { queued: rows.length };
     }
 
+    // Kick the worker. This is still fire-and-forget in spirit — we do
+    // NOT wait for the actual render, which can take up to process.js's
+    // own 60s limit. But the original version used a bare
+    // `.catch(() => {})` with no await at all, which meant a failed
+    // trigger — network blip, DNS hiccup — left nine stories sitting at
+    // `pending` with zero visibility into why. That happened once
+    // already during testing and took a manual Supabase check to catch.
+    //
+    // The fix: wait just long enough (5s) to confirm the request was
+    // ACCEPTED, then stop waiting regardless of whether the render has
+    // finished. AbortController cancels our own wait, not the render
+    // itself — process.js keeps running server-side either way, this
+    // only affects how long ingest.js hangs around to check.
     const base = "https://" + (req.headers.host || "news30.live");
-    fetch(base + "/api/cron/process", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + secret },
-    }).catch(() => {});
+    const kickController = new AbortController();
+    const kickTimeout = setTimeout(() => kickController.abort(), 5000);
+
+    try {
+      const kickRes = await fetch(base + "/api/cron/process", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + secret },
+        signal: kickController.signal,
+      });
+      clearTimeout(kickTimeout);
+      if (!kickRes.ok) {
+        console.error("[ingest] worker trigger rejected:", kickRes.status);
+      } else {
+        console.log("[ingest] worker trigger accepted");
+      }
+    } catch (kickErr) {
+      clearTimeout(kickTimeout);
+      if (kickErr.name === "AbortError") {
+        // Expected on a normal run: the render is still in progress
+        // after 5s, which is fine — this just means we stopped
+        // watching, not that anything failed.
+        console.log("[ingest] worker trigger sent, still rendering after 5s (normal)");
+      } else {
+        // A genuine failure to even reach the endpoint — this is the
+        // case the old bare .catch(() => {}) was hiding.
+        console.error("[ingest] worker trigger failed to send:", kickErr);
+      }
+    }
 
     res.status(200).json({ ok: true, summary });
   } catch (e) {
