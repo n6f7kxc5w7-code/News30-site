@@ -3012,11 +3012,23 @@ function App() {
      stories; on failure everything stays on the curated samples. */
   const [newsVersion, setNewsVersion] = React.useState(0);
   React.useEffect(() => {
-    newsService.load().then((ok) => {
-      if (ok) { setNewsVersion(1); toast("Live headlines loaded", "flame"); }
-    });
+    let cancelled = false;
+    (async () => {
+      const gotStories = await storiesService.load();
+      if (cancelled) return;
+      if (gotStories) {
+        setNewsVersion((v) => v + 1);
+        toast("Latest videos loaded", "flame");
+        return;
+      }
+      const gotHeadlines = await newsService.load();
+      if (cancelled || !gotHeadlines) return;
+      setNewsVersion((v) => v + 1);
+      toast("Live headlines loaded", "flame");
+    })();
+    return () => { cancelled = true; };
   }, [toast]);
-
+   
   /* Demo of "breaking news" — a sample story posts 30s after load,
      lands top of feed + fires a notification + toast. Skipped once
      real NewsAPI headlines are live. 🔌 Real build: websocket /
