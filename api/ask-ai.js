@@ -1,57 +1,72 @@
 // /api/ask-ai.js
-// 🔌 GEMINI SERVER PROXY — runs on Vercel's servers (Node.js runtime),
-// never in the browser.
+// 🔌 AI SERVER PROXY — runs on Vercel's servers, never in the browser.
 //
-// WHY THIS EXISTS: the Gemini key was previously read client-side via
-// VITE_GEMINI_API_KEY, which ships the real key inside the public JS
-// bundle — anyone visiting news30.live could open dev tools and read
-// it. Google's abuse scanners found it, a third party used it, and the
-// project got suspended. Routing every Gemini call through this
-// endpoint means the real key only ever lives on the server.
+// Switched to DeepSeek after Gemini's suspension went unanswered for
+// over a week, and after Claude's per-token cost proved too high for
+// this project's £50/month ceiling. DeepSeek's API is OpenAI-compatible
+// (same request/response shape as OpenAI's chat completions), which is
+// why this rewrite is a smaller diff than the Gemini→Claude one was.
 //
-// SECURITY RULES ENFORCED HERE:
-//   1. Key read from process.env only — never a VITE_ var, never hardcoded.
-//   2. Key sent as a header, not a ?key= query string (query strings end
-//      up in logs, error traces, and proxy records).
-//   3. Upstream error details are logged server-side but NEVER forwarded
-//      to the browser — Google's error payloads can echo the request URL
-//      back, which would leak the key to any visitor who triggers an error.
-//   4. CORS locked to our own origins, so other sites can't burn our quota.
+// ⚠️ KNOWN LIMITATION: DeepSeek has no hosted web-search tool the way
+// Gemini (google_search) and Claude (web_search_20250305) do. The
+// `useWebSearch` flag from the frontend is accepted but currently a
+// no-op — answers come from the model's training data only, not live
+// results. "Ask AI" questions about breaking news will be less current
+// than before. If that turns out to matter, the fix is pairing this
+// with a separate cheap search API (e.g. Brave Search, Tavily) rather
+// than switching providers again.
+//
+// The wire contract with the frontend is UNCHANGED — App.jsx still
+// sends { system, messages, useWebSearch } with messages shaped as
+// { role: "user"|"model", parts: [{ text }] } (the Gemini shape it was
+// already using). That shape is translated to OpenAI-style { role,
+// content } internally, so App.jsx never needs to change.
 //
 // Setup in Vercel → Settings → Environment Variables:
-//   GEMINI_API_KEY = your real AI Studio key   (NO "VITE_" prefix)
-// Delete the old VITE_GEMINI_API_KEY var entirely — nothing reads it now.
+//   DEEPSEEK_API_KEY = your real key from platform.deepseek.com
+//   (NO "VITE_" prefix — that ships it to the browser bundle, which is
+//   the exact mistake that got the original Gemini key suspended.)
 //
 // Frontend contract (unchanged):
 //   POST /api/ask-ai   body: { system, messages, useWebSearch, model? }
 //   → { text: "..." } on success, { error: "..." } on failure.
 
-// Gemini 2.0 Flash and 2.0 Flash-Lite were shut down on 1 June 2026 and
-// now return 404 — do not put them back. 2.5 Flash-Lite is Google's
-// recommended replacement and the cheapest capable option, which suits
-// the short summaries and answers this endpoint produces.
-// Model retirements have broken this project twice now; worth checking
-// https://ai.google.dev/gemini-api/docs/models periodically rather than
-// finding out through a 404 in production.
 import { enforceRateLimit } from "./_rate-limit.js";
 
-const DEFAULT_MODEL = "gemini-2.5-flash-lite";
-const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_MODEL = "deepseek-chat";
+const ENDPOINT = "https://api.deepseek.com/chat/completions";
+const MAX_TOKENS = 1000;
 
-// Only these origins may call this endpoint. Add Vercel preview URLs here
-// if you test against them; keep the list tight otherwise.
+// Models the client is permitted to request. deepseek-reasoner does
+// chain-of-thought and costs more per token — allowed, but never the
+// default, since Ask AI's questions don't need heavy reasoning.
+const ALLOWED_MODELS = ["deepseek-chat", "deepseek-reasoner"];
+
 const ALLOWED_ORIGINS = [
   "https://news30.live",
   "https://www.news30.live",
-  "http://localhost:5173", // Vite dev server
+  "http://localhost:5173",
 ];
 
-// Models the client is permitted to request. Prevents someone pointing an
-// arbitrary/expensive model at your key via the optional `model` field.
-const ALLOWED_MODELS = [
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-flash",
-];
+// Frontend sends Gemini-shaped history: { role: "user"|"model", parts:
+// [{ text }] }. OpenAI-compatible APIs want { role: "user"|"assistant",
+// content: "..." }. Translating here means App.jsx never has to change.
+function toOpenAIMessages(system, messages) {
+  const out = [];
+  if (system) out.push({ role: "system", content: system });
+
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const text = Array.isArray(m.parts)
+      ? m.parts.map((p) => p.text || "").join("")
+      : (m.text || "");
+    if (!text.trim()) continue;
+    out.push({
+      role: m.role === "model" || m.role === "assistant" ? "assistant" : "user",
+      content: text,
+    });
+  }
+  return out;
+}
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
@@ -73,74 +88,56 @@ export default async function handler(req, res) {
   }
 
   // 30 questions per IP per hour. Someone reading and asking follow-ups
-  // will never come close; a script hits it in seconds. CORS restricts
-  // browsers on other origins but does nothing about direct requests,
-  // so this is what actually caps the spend.
+  // will never come close; a script hits it in seconds. The pipeline
+  // worker bypasses this via x-pipeline-secret — see _rate-limit.js.
   if (!(await enforceRateLimit(req, res, "ask-ai", 30, 60))) return;
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    console.error("[ask-ai] GEMINI_API_KEY is not set in the environment");
-    // Generic message — never hint at key material or config specifics.
+    console.error("[ask-ai] DEEPSEEK_API_KEY is not set in the environment");
     res.status(500).json({ error: "AI service unavailable" });
     return;
   }
 
-  const { system, messages, useWebSearch, model } = req.body || {};
+  const { system, messages, model } = req.body || {};
+  // useWebSearch is destructured but intentionally unused — see the
+  // limitation note at the top of this file.
 
-  if (!Array.isArray(messages) || messages.length === 0) {
+  const chatMessages = toOpenAIMessages(system, messages);
+  if (chatMessages.filter((m) => m.role !== "system").length === 0) {
     res.status(400).json({ error: "messages is required" });
     return;
   }
 
-  // Allowlist check — unknown models silently fall back to the default
-  // rather than being passed through to Google.
   const useModel = ALLOWED_MODELS.includes(model) ? model : DEFAULT_MODEL;
 
-  const body = {
-    contents: messages,
-    generationConfig: { maxOutputTokens: 1000 },
-  };
-  if (system) {
-    body.systemInstruction = { parts: [{ text: system }] };
-  }
-  if (useWebSearch) {
-    body.tools = [{ google_search: {} }];
-  }
-
   try {
-    const upstream = await fetch(
-      ENDPOINT + "/" + useModel + ":generateContent",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Key travels in a header, never in the URL.
-          "x-goog-api-key": apiKey,
-        },
-        body: JSON.stringify(body),
-      }
-    );
+    const upstream = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + apiKey, // header, never a query string
+      },
+      body: JSON.stringify({
+        model: useModel,
+        max_tokens: MAX_TOKENS,
+        messages: chatMessages,
+      }),
+    });
 
     const data = await upstream.json().catch(() => ({}));
 
     if (!upstream.ok) {
-      // Full detail goes to Vercel logs only — you can read it there.
-      console.error(
-        "[ask-ai] upstream error",
-        upstream.status,
-        JSON.stringify(data)
-      );
-      // Client gets the status code and nothing else.
+      // Full detail to Vercel logs only. Upstream error payloads can
+      // include request context; never forward that to the browser.
+      console.error("[ask-ai] upstream error", upstream.status, JSON.stringify(data));
       res.status(upstream.status).json({
         error: "AI request failed (" + upstream.status + ")",
       });
       return;
     }
 
-    const cand = data.candidates && data.candidates[0];
-    const parts = (cand && cand.content && cand.content.parts) || [];
-    const text = parts.map((pt) => pt.text || "").join("").trim();
+    const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || "").trim();
 
     if (!text) {
       console.error("[ask-ai] empty response from model", JSON.stringify(data));
@@ -150,8 +147,8 @@ export default async function handler(req, res) {
 
     res.status(200).json({ text });
   } catch (e) {
-    // String(e) on a fetch failure can contain the full request URL.
-    // Log it, never send it.
+    // String(e) on a fetch failure can contain the request URL — log
+    // only, never return to the client.
     console.error("[ask-ai] request threw:", e);
     res.status(500).json({ error: "AI request failed" });
   }
