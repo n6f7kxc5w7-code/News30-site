@@ -551,7 +551,98 @@ const newsService = {
     return [...LIVE.stories.geopolitics, ...LIVE.stories.finance, ...LIVE.stories.sports];
   },
 };
+/* ── PUBLISHED STORIES (Supabase) ──────────────────────────────────
+   🔌 The real pipeline output. api/cron/ingest.js clusters headlines
+   into published_stories; api/cron/process.js chains script → audio →
+   video → thumbnail and flips status to 'ready'. This reads those
+   finished rows and maps them onto the same story shape the whole UI
+   already consumes, so cards, player, panels and quizzes work
+   unchanged — except now with a real video_url and thumbnail_url
+   attached. Falls back to newsService (NewsAPI headlines, no video)
+   when there are no ready rows, and that in turn falls back to the
+   curated samples.                                                  */
 
+/* Handles durations over 60s, unlike fmtDur which assumes "0:SS". */
+const fmtDurAny = (sec) => {
+  const s = Math.max(0, Math.round(sec || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+
+/* Maps whatever category strings the ingest worker writes onto the
+   three categories the UI has chips for. Extend as you add more. */
+const CATEGORY_ALIASES = {
+  geopolitics: "geopolitics", world: "geopolitics", politics: "geopolitics", general: "geopolitics",
+  finance: "finance", business: "finance", markets: "finance", economy: "finance",
+  sports: "sports", sport: "sports",
+};
+const normaliseCategory = (c) => CATEGORY_ALIASES[String(c || "").toLowerCase()] || "geopolitics";
+
+function mapPublishedStory(row) {
+  const category = normaliseCategory(row.category);
+  const seed = hash(String(row.id));
+  const rnd = seeded(seed);
+  const durationSec = Math.max(1, Math.round(row.duration_seconds || 30));
+  const srcName = (row.source || "Newswire").replace(/\.(com|org|net)$/i, "");
+  const story = {
+    id: "pub-" + row.id,
+    category,
+    headline: row.headline || "",
+    kicker: LIVE_KICKERS[category][seed % LIVE_KICKERS[category].length],
+    source: srcName,
+    bias: OUTLET_BIAS[srcName.toLowerCase()] || "centre",
+    fact: "verified",
+    publishedAt: Date.parse(row.article_published) || Date.parse(row.created_at) || NOW,
+    duration: fmtDurAny(durationSec),
+    durationSec,
+    views: 800 + Math.floor(rnd() * 240000), // placeholder until real analytics
+    seed,
+    url: row.article_url || null,
+    video_url: row.video_url || null,
+    thumbnail_url: row.thumbnail_url || null,
+    script: row.script || null,
+  };
+  LIVE_CACHE.set(story.id, story);
+  return story;
+}
+
+const storiesService = {
+  async load() {
+    if (!supabase) return false;
+    try {
+      const { data, error } = await supabase
+        .from("published_stories")
+        .select("id, headline, source, category, article_url, article_published, created_at, script, audio_url, video_url, thumbnail_url, duration_seconds, status")
+        .eq("status", "ready")
+        .not("video_url", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) throw error;
+
+      const rows = data || [];
+      if (!rows.length) {
+        track("stories_none_ready");
+        return false;
+      }
+
+      const mapped = rows.map(mapPublishedStory);
+      LIVE.stories.geopolitics = mapped.filter((s) => s.category === "geopolitics");
+      LIVE.stories.finance = mapped.filter((s) => s.category === "finance");
+      LIVE.stories.sports = mapped.filter((s) => s.category === "sports");
+      LIVE.ready = true;
+
+      track("stories_loaded", {
+        total: mapped.length,
+        geopolitics: LIVE.stories.geopolitics.length,
+        finance: LIVE.stories.finance.length,
+        sports: LIVE.stories.sports.length,
+      });
+      return true;
+    } catch (e) {
+      track("stories_load_failed", { error: String(e) });
+      return false;
+    }
+  },
+};
 const PAGE_SIZE = 12;
 /** Feed pager. Serves live NewsAPI headlines when loaded; otherwise
     page 0 = curated samples and deeper pages walk back through the
