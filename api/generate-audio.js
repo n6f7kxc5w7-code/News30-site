@@ -1,54 +1,42 @@
 // /api/generate-audio.js
 // 🔌 STEP 2 OF THE VIDEO PIPELINE — produces the script (optionally) and
 // turns it into narration audio. Server-side only, so FISH_API_KEY,
-// GEMINI_API_KEY and the Supabase service_role key stay out of the browser.
+// DEEPSEEK_API_KEY and the Supabase service_role key stay out of the
+// browser.
+//
+// Switched to DeepSeek after Gemini's suspension went unanswered for
+// over a week and Claude proved too expensive for this project's
+// £50/month ceiling. This task — a 70-word script plus three search
+// phrases — doesn't need frontier-model reasoning, which is what makes
+// DeepSeek's price point a good fit here specifically.
 //
 // Flow: create a video_jobs row -> (optionally generate the script via
-// Gemini) -> call Fish Audio TTS -> upload the MP3 to Supabase Storage
-// -> save the public URL back onto the job row -> return it.
+// DeepSeek) -> call Fish Audio TTS -> upload the MP3 to Supabase
+// Storage -> save the public URL back onto the job row -> return it.
 //
-// ─── WHAT'S NEW: IMAGE QUERIES COME FROM GEMINI ──────────────────────
-// Stock photo selection used to rely on a hardcoded keyword map in
-// generate-video.js, matching trigger words in the headline. That map
-// can only recognise vocabulary it was written for, so headlines like
-// "Israel and Hamas agree ceasefire framework" or "Norway's sovereign
-// wealth fund posts record returns" scored zero triggers and fell
-// through to generic newspaper photos.
+// ─── WHY IMAGE QUERIES COME FROM HERE, NOT THE KEYWORD MAP ───────────
+// generate-video.js has a hardcoded keyword map for picking stock photo
+// search terms, but it can only recognise vocabulary it was written
+// for — headlines like "Israel and Hamas agree ceasefire framework"
+// score zero triggers and fall through to generic photos.
 //
-// Feeding the SCRIPT into that same map instead of the headline doesn't
-// help — the script is written from the headline, so it uses the same
-// vocabulary, and its extra length just adds more chances for a stray
-// "war" or "attack" to score a bucket the story isn't about.
+// So this endpoint asks DeepSeek for the script AND three stock-photo
+// search phrases in the SAME call — no extra API round-trip, which
+// matters against Vercel's 60s function limit. The phrases are stored
+// on the job row and read directly by generate-video.js. The keyword
+// map stays there as a fallback for when this returns nothing usable.
 //
-// So: Gemini now returns the script AND three stock-photo search phrases
-// in a single JSON response, in the call we were already making. No
-// extra API round-trip, no added latency against Vercel's 60s limit —
-// which is what made the earlier "ask Gemini for keywords in step 3"
-// approach untenable. The phrases are stored on the job row and read
-// directly by generate-video.js.
-//
-// The keyword map stays in generate-video.js as a fallback, so a bad or
-// unparseable Gemini response degrades to the old behaviour rather than
-// failing the render.
-//
-// ─── REQUIRED: ADD THIS COLUMN TO video_jobs ─────────────────────────
-//   alter table video_jobs add column if not exists image_queries jsonb;
-//
-// Required Vercel env vars (all server-only, NO "VITE_" prefix):
-//   FISH_API_KEY, FISH_VOICE_ID, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY
+// Setup in Vercel → Settings → Environment Variables:
+//   FISH_API_KEY, FISH_VOICE_ID, SUPABASE_SERVICE_ROLE_KEY,
+//   DEEPSEEK_API_KEY
 // Reuses VITE_SUPABASE_URL (just the project URL, not a secret).
 
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
 
-// Gemini 2.0 Flash and 2.0 Flash-Lite were shut down on 1 June 2026 and
-// now return 404 — do not put them back. 2.5 Flash-Lite is Google's
-// recommended replacement and the cheapest capable option; the work here
-// (a 70-word script plus three search phrases) needs speed and low cost
-// far more than deep reasoning.
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
-const GEMINI_ENDPOINT =
-  "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent";
+const DEEPSEEK_MODEL = "deepseek-chat";
+const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
+const MAX_TOKENS = 700;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -56,8 +44,8 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5173",
 ];
 
-// Used if Gemini returns nothing usable — generate-video.js will then
-// fall back to its own keyword map, which is the pre-existing behaviour.
+// Used if DeepSeek returns nothing usable — generate-video.js then
+// falls back to its own keyword map, which is the pre-existing behaviour.
 const EMPTY_QUERIES = [];
 
 const SCRIPT_PROMPT = `You write short vertical news videos.
@@ -71,7 +59,9 @@ video, based on the headline below. Plain spoken sentences only — no
 headings, no bullet points, no stage directions, no speaker labels.
 Open with the news itself. Write numbers as words where it reads more
 naturally aloud ("four point two five percent", not "4.25%"), since
-this text is sent straight to a text-to-speech engine.
+this text is sent straight to a text-to-speech engine. Only narrate
+what is stated in the headline — do not invent specific facts, figures,
+or outcomes that are not given to you.
 
 imageQueries: exactly 3 stock-photo search phrases that visually
 represent this story on Pexels. Rules:
@@ -89,15 +79,14 @@ Example for the headline "Israel and Hamas agree ceasefire framework":
 Example for the headline "Norway's sovereign wealth fund posts record returns":
 {"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"]}`;
 
-// Gemini sometimes wraps JSON in fences or adds a stray sentence despite
-// being told not to, so parse defensively and never throw — a failure
+// DeepSeek's JSON mode (response_format) makes malformed output less
+// likely than plain prompting, but still parse defensively — a failure
 // here should cost us the image queries, not the whole render.
 function parseScriptResponse(raw) {
   if (!raw) return null;
 
   let cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
 
-  // If there's leading/trailing prose, grab the outermost JSON object.
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
   if (first === -1 || last === -1 || last <= first) return null;
@@ -129,43 +118,42 @@ async function generateScript(headline, category, apiKey) {
     "\n\nHeadline: " + headline +
     "\nCategory: " + (category || "news");
 
-  const upstream = await fetch(GEMINI_ENDPOINT, {
+  const upstream = await fetch(DEEPSEEK_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // Header, not a ?key= query string — query strings end up in logs.
-      "x-goog-api-key": apiKey,
+      Authorization: "Bearer " + apiKey, // header, never a query string
     },
     body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        maxOutputTokens: 600,
-        temperature: 0.7,
-        responseMimeType: "application/json",
-      },
+      model: DEEPSEEK_MODEL,
+      max_tokens: MAX_TOKENS,
+      // Forces the model to emit a JSON object — the prompt still has
+      // to specify the shape, but this cuts down on stray prose around
+      // the JSON that the defensive parser would otherwise have to strip.
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: prompt }],
     }),
   });
 
   const data = await upstream.json().catch(() => ({}));
 
   if (!upstream.ok) {
-    // Logged, never returned — Gemini error payloads can echo the request back.
-    console.error("[generate-audio] Gemini error", upstream.status, JSON.stringify(data));
+    // Logged, never returned — upstream error payloads can echo request
+    // context back.
+    console.error("[generate-audio] DeepSeek error", upstream.status, JSON.stringify(data));
     throw new Error("Script generation failed (" + upstream.status + ")");
   }
 
-  const cand = data.candidates && data.candidates[0];
-  const parts = (cand && cand.content && cand.content.parts) || [];
-  const raw = parts.map((p) => p.text || "").join("").trim();
+  const raw = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || "").trim();
 
   const parsed = parseScriptResponse(raw);
   if (!parsed) {
-    console.error("[generate-audio] could not parse Gemini response:", raw.slice(0, 400));
+    console.error("[generate-audio] could not parse DeepSeek response:", raw.slice(0, 400));
     throw new Error("Script generation returned an unusable response");
   }
 
   if (!parsed.imageQueries.length) {
-    console.warn("[generate-audio] Gemini returned no usable imageQueries; falling back to keyword map");
+    console.warn("[generate-audio] DeepSeek returned no usable imageQueries; falling back to keyword map");
   }
 
   return parsed;
@@ -193,16 +181,17 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Much tighter than ask-ai: every call spends Gemini AND Fish Audio
-  // credits, and narration is billed per character of script.
+  // Much tighter than ask-ai: every call spends DeepSeek AND Fish Audio
+  // credits, and narration is billed per character. The pipeline worker
+  // bypasses this via x-pipeline-secret — see _rate-limit.js.
   if (!(await enforceRateLimit(req, res, "generate-audio", 5, 60))) return;
 
   // Two accepted call shapes:
   //   { storyId, script }                       — script supplied (test harness)
-  //   { storyId, headline, category }           — generate script + queries via Gemini
+  //   { storyId, headline, category }           — generate script + queries via DeepSeek
   // Passing a script explicitly always wins, so the test page keeps
   // working exactly as before and stays useful for isolating TTS issues
-  // without spending a Gemini call.
+  // without spending an AI call.
   const { storyId, script: providedScript, headline, category, imageQueries: providedQueries } = req.body || {};
 
   if (!storyId) {
@@ -218,7 +207,7 @@ export default async function handler(req, res) {
   const voiceId = process.env.FISH_VOICE_ID;
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
 
   if (!fishKey || !voiceId || !supabaseUrl || !serviceKey) {
     console.error("[generate-audio] missing config", {
@@ -230,8 +219,8 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Server is not configured for audio generation" });
     return;
   }
-  if (!providedScript && !geminiKey) {
-    console.error("[generate-audio] GEMINI_API_KEY missing but script generation was requested");
+  if (!providedScript && !deepseekKey) {
+    console.error("[generate-audio] DEEPSEEK_API_KEY missing but script generation was requested");
     res.status(500).json({ error: "Server is not configured for script generation" });
     return;
   }
@@ -257,14 +246,14 @@ export default async function handler(req, res) {
     let imageQueries = Array.isArray(providedQueries) ? providedQueries.slice(0, 3) : [];
 
     if (!script) {
-      const generated = await generateScript(headline, category, geminiKey);
+      const generated = await generateScript(headline, category, deepseekKey);
       script = generated.script;
       if (!imageQueries.length) imageQueries = generated.imageQueries;
     }
 
     // Persist both before TTS — if narration fails, the script and
     // queries survive on the row and the job can be retried cheaply
-    // without paying for another Gemini call.
+    // without paying for another AI call.
     await supabase
       .from("video_jobs")
       .update({
