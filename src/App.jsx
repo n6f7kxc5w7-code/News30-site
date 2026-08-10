@@ -1152,7 +1152,8 @@ input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0
 .notif{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background .12s;align-items:flex-start;width:100%;text-align:left}
 .notif:hover{background:#2c2c2c}
 .notif-thumb{width:84px;height:47px;border-radius:8px;overflow:hidden;flex:none}
-.notif-thumb svg{width:100%;height:100%;display:block}
+.thumb svg{width:100%;height:100%;display:block}
+.thumb img{width:100%;height:100%;display:block;object-fit:cover}
 .notif-t{font-size:13.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .notif-m{font-size:12px;color:var(--txt2);margin-top:4px}
 .notif-dot{width:5px;height:5px;border-radius:50%;background:var(--blue);flex:none;margin-top:9px}
@@ -1247,6 +1248,7 @@ const CSS2 = `
 .player.panel-open .pl-stage{transform:translateX(-208px)}
 .pl-video{position:relative;height:100%;aspect-ratio:9/16;border-radius:14px;overflow:hidden;background:#000;box-shadow:0 10px 44px rgba(0,0,0,.6)}
 .pl-video>svg{position:absolute;inset:0;width:100%;height:100%}
+.pl-vid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 .pl-kb{animation:kenburns 24s ease-in-out infinite alternate;transform-origin:62% 38%}
 .pl-kb.paused{animation-play-state:paused}
 .pl-grad{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.4),transparent 26%,transparent 52%,rgba(0,0,0,.76));pointer-events:none}
@@ -1939,8 +1941,10 @@ function StoryCard({ story, onOpen, onCardMenu }) {
   return (
     <div className="card" onClick={onOpen} role="button" tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter") onOpen(); }}>
-      <div className="thumb">
-        <ThumbArt story={story} />
+            <div className="thumb">
+        {story.thumbnail_url
+          ? <img src={story.thumbnail_url} alt="" loading="lazy" />
+          : <ThumbArt story={story} />}
         <span className="badge-date">{dateBadge(story.publishedAt)}</span>
         <span className="badge-dur">{story.duration}</span>
       </div>
