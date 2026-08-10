@@ -2771,18 +2771,31 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const [ppKey, setPpKey] = React.useState(0);
   const [heartKey, setHeartKey] = React.useState(0);
   const watchedRef = React.useRef({});
-  const touchRef = React.useRef(null);
+    const touchRef = React.useRef(null);
+  const videoRef = React.useRef(null);
+  const hasVideo = !!story.video_url;
 
   React.useEffect(() => { setProgress(0); setPlaying(true); }, [story.id]);
 
-  /* simulated playback clock — swap for real <video> timeupdate later */
+  /* Simulated clock — only for stories with no rendered video yet. */
   React.useEffect(() => {
-    if (!playing) return;
+    if (hasVideo || !playing) return;
     const iv = setInterval(() => {
       setProgress((p) => Math.min(1, p + 0.1 / story.durationSec));
     }, 100);
     return () => clearInterval(iv);
-  }, [playing, story.id, story.durationSec]);
+  }, [playing, story.id, story.durationSec, hasVideo]);
+
+  /* Keep the <video> element in sync with playing state. Browsers block
+     autoplay with sound, so a rejected play() drops us into the paused
+     state and the tap overlay starts it on the first touch. */
+  React.useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (playing) v.play().catch(() => setPlaying(false));
+    else v.pause();
+  }, [playing, story.id]);
+
 
   /* auto-advance to the next story when this one ends */
   React.useEffect(() => {
@@ -2850,8 +2863,28 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
       </div>
 
       <div className="pl-stage">
-        <div className="pl-video" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-          <ThumbArt story={story} variant="video" paused={!playing} />
+         <div className="pl-video" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+          {hasVideo ? (
+            <video
+              key={story.id}
+              ref={videoRef}
+              className="pl-vid"
+              src={story.video_url}
+              poster={story.thumbnail_url || undefined}
+              playsInline
+              autoPlay
+              preload="auto"
+              onTimeUpdate={(e) => {
+                const el = e.currentTarget;
+                if (el.duration) setProgress(el.currentTime / el.duration);
+              }}
+              onEnded={() => setProgress(1)}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
+            />
+          ) : (
+            <ThumbArt story={story} variant="video" paused={!playing} />
+          )}
           <div className="pl-grad" />
           <button className="pl-tap" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} />
           <div className="pl-topline">
