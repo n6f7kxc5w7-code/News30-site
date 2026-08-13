@@ -2000,7 +2000,14 @@ function InfiniteFeed({ category, fresh, feedVersion, openPlayer, onCardMenu }) 
     return [...fr, ...out];
   }, [category, pages, fresh, feedVersion]);
 
-  const done = pages >= MAX_PAGES;
+    /* Stop paging as soon as a page comes back empty, so the feed ends at
+     the last real story instead of spinning against a dead source. */
+   const exhausted = React.useMemo(
+    () => getFeed(category, pages - 1).length === 0,
+    [category, pages, feedVersion]
+  );
+   const done = pages >= MAX_PAGES || exhausted;
+
 
   React.useEffect(() => {
     const el = sentRef.current;
@@ -2984,11 +2991,9 @@ function useViewport() {
   return w;
 }
 
-const seedNotifications = () => [
-  { id: "n1", storyId: "f1", title: "Fed holds rates as inflation cools to 2.4%", at: NOW - 42 * 60000, read: false },
-  { id: "n2", storyId: "s1", title: "Mbappé double sends France to the semi-finals", at: NOW - 3 * 3600000, read: false },
-  { id: "n3", storyId: "g3", title: "China and India agree to de-escalate border tensions", at: NOW - 9 * 3600000, read: true },
-];
+/* 🔌 Real notifications will be pushed from the ingest worker; until then
+   the bell starts empty rather than showing sample stories. */
+const seedNotifications = () => [];
 
 function App() {
   const vw = useViewport();
