@@ -481,7 +481,7 @@ const OUTLET_BIAS = {
   "daily mail": "right", "the telegraph": "right",
 };
 
-const LIVE = { ready: false, stories: { geopolitics: [], finance: [], sports: [] } };
+const LIVE = { ready: false, source: null, stories: { geopolitics: [], finance: [], sports: [] } };
 const LIVE_CACHE = new Map(); // id → story (deep links, saved items, notifications)
 
 function mapArticle(a, category, idx) {
@@ -525,6 +525,8 @@ const newsService = {
       }));
       cats.forEach((cat, i) => { LIVE.stories[cat] = results[i]; });
       LIVE.ready = results.some((r) => r.length > 0);
+         if (LIVE.ready) LIVE.source = "newsapi";
+
       track("news_live_loaded", { geopolitics: LIVE.stories.geopolitics.length, finance: LIVE.stories.finance.length, sports: LIVE.stories.sports.length });
       return LIVE.ready;
     } catch (e) {
@@ -629,6 +631,8 @@ const storiesService = {
       LIVE.stories.finance = mapped.filter((s) => s.category === "finance");
       LIVE.stories.sports = mapped.filter((s) => s.category === "sports");
       LIVE.ready = true;
+         LIVE.source = "published";
+
 
       track("stories_loaded", {
         total: mapped.length,
@@ -649,9 +653,13 @@ const PAGE_SIZE = 12;
     dated archive. In live mode, pages beyond the API supply continue
     into the archive so infinite scroll never dead-ends. */
 function getFeed(category, page) {
-  if (newsService.isLive()) {
-    const live = newsService.page(category, page);
-    if (live.length) return live;
+    if (newsService.isLive()) {
+       const live = newsService.page(category, page);
+       if (live.length) return live;
+       /* Published stories are the real pipeline output — when they're the
+       source, an empty page means the end of the feed, not a cue to fall
+       back to curated samples or the generated archive. */
+       if (LIVE.source === "published") return [];
   }
   if (page === 0) {
     if (category === "all") return CURATED_ALL.slice().sort((a, b) => b.publishedAt - a.publishedAt);
