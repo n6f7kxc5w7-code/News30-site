@@ -1263,7 +1263,9 @@ const CSS2 = `
 .pl-tap{position:absolute;inset:0;border:0;cursor:pointer}
 .pl-topline{position:absolute;top:0;left:0;right:0;padding:14px;display:flex;justify-content:flex-end;pointer-events:none}
 .pl-cat{display:inline-flex;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);border-radius:999px;padding:6px 13px;font-size:12.5px;font-weight:600;letter-spacing:.3px}
-.pl-info{position:absolute;left:16px;right:74px;bottom:20px;pointer-events:none}
+.pl-info{position:absolute;left:16px;right:74px;bottom:20px;pointer-events:none;transition:opacity .4s ease}
+.pl-topline{transition:opacity .4s ease}
+.pl-fade{opacity:0}
 .pl-kick{display:inline-block;background:var(--blue);color:#04182b;font-weight:800;font-size:11.5px;letter-spacing:.9px;padding:3px 9px;border-radius:5px;margin-bottom:9px}
 .pl-headline{font-size:19px;line-height:1.32;font-weight:600;text-shadow:0 1px 10px rgba(0,0,0,.65)}
 .pl-sub{margin-top:9px;font-size:12.5px;color:#e2e2e2;display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;text-shadow:0 1px 6px rgba(0,0,0,.6)}
@@ -1388,6 +1390,10 @@ const CSS2 = `
 @keyframes slide-l{from{transform:translateX(64px);opacity:0}}
 @keyframes slide-r{from{transform:translateX(-100%)}}
 @keyframes slide-up{from{transform:translateY(100%)}}
+@keyframes shorts-up{from{transform:translateY(101%)}to{transform:translateY(0)}}
+@keyframes shorts-down{from{transform:translateY(-101%)}to{transform:translateY(0)}}
+.pl-anim-up{animation:shorts-up .3s cubic-bezier(.22,.7,.3,1)}
+.pl-anim-down{animation:shorts-down .3s cubic-bezier(.22,.7,.3,1)}
 @keyframes shimmer{to{transform:translateX(100%)}}
 @keyframes rot{to{transform:rotate(360deg)}}
 @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
@@ -2778,7 +2784,6 @@ function VideoGenPanel({ story, onClose }) {
 }
 
 /* ═════ 12 · PLAYER — fullscreen vertical story player (Shorts-style) ═ */
-
 function Player({ story, list, index, onNavIndex, onClose, user, userData, dispatch, toast }) {
   const [playing, setPlaying] = React.useState(true);
   const [progress, setProgress] = React.useState(0);
@@ -2786,11 +2791,22 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const [ppKey, setPpKey] = React.useState(0);
   const [heartKey, setHeartKey] = React.useState(0);
   const watchedRef = React.useRef({});
-    const touchRef = React.useRef(null);
+  const touchRef = React.useRef(null);
   const videoRef = React.useRef(null);
   const hasVideo = !!story.video_url;
 
   React.useEffect(() => { setProgress(0); setPlaying(true); }, [story.id]);
+
+  /* Headline and category pill fade out 2s into playback and return the
+     moment it's paused, so they don't sit on top of the burned-in
+     subtitles for the whole clip. */
+  const [chromeVisible, setChromeVisible] = React.useState(true);
+  React.useEffect(() => {
+    setChromeVisible(true);
+    if (!playing) return;
+    const t = setTimeout(() => setChromeVisible(false), 2000);
+    return () => clearTimeout(t);
+  }, [playing, story.id]);
 
   /* Simulated clock — only for stories with no rendered video yet. */
   React.useEffect(() => {
@@ -2811,7 +2827,6 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     else v.pause();
   }, [playing, story.id]);
 
-
   /* auto-advance to the next story when this one ends */
   React.useEffect(() => {
     if (progress < 1) return;
@@ -2830,8 +2845,15 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     }
   }, [progress, story.id, story.category, dispatch]);
 
-  const next = React.useCallback(() => { if (index < list.length - 1) onNavIndex(index + 1); }, [index, list.length, onNavIndex]);
-  const prev = React.useCallback(() => { if (index > 0) onNavIndex(index - 1); }, [index, onNavIndex]);
+  /* 1 = moving to a later story (slides up from below), -1 = earlier
+     story (slides down from above), 0 = first open, no animation. */
+  const [dir, setDir] = React.useState(0);
+  const next = React.useCallback(() => {
+    if (index < list.length - 1) { setDir(1); onNavIndex(index + 1); }
+  }, [index, list.length, onNavIndex]);
+  const prev = React.useCallback(() => {
+    if (index > 0) { setDir(-1); onNavIndex(index - 1); }
+  }, [index, onNavIndex]);
   const togglePlay = () => { setPlaying((p) => !p); setPpKey((k) => k + 1); };
 
   React.useEffect(() => {
@@ -2878,7 +2900,12 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
       </div>
 
       <div className="pl-stage">
-         <div className="pl-video" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+        <div
+          key={story.id}
+          className={cls("pl-video", dir === 1 && "pl-anim-up", dir === -1 && "pl-anim-down")}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
+        >
           {hasVideo ? (
             <video
               key={story.id}
@@ -2902,7 +2929,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
           )}
           <div className="pl-grad" />
           <button className="pl-tap" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} />
-          <div className="pl-topline">
+          <div className={cls("pl-topline", !chromeVisible && "pl-fade")}>
             <span className="pl-cat"><Icon name={catIcon} size={14} stroke={2.2} /> {catLabel(story.category)}</span>
           </div>
           {ppKey > 0 && (
@@ -2910,7 +2937,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
               <Icon name={playing ? "play" : "pause"} size={30} filled />
             </div>
           )}
-          <div className="pl-info">
+          <div className={cls("pl-info", !chromeVisible && "pl-fade")}>
             <span className="pl-kick">{story.kicker}</span>
             <div className="pl-headline">{story.headline}</div>
             <div className="pl-sub">
