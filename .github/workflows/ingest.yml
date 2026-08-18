@@ -9,6 +9,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Call ingest endpoint
-        run:
-          curl -sS -L --fail-with-body -X POST https://www.news30.live/api/cron/ingest \
-              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+        run: curl -sS -L --fail-with-body -X POST https://www.news30.live/api/cron/ingest -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
