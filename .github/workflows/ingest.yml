@@ -1,0 +1,14 @@
+name: Trigger ingest
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ingest endpoint
+        run: |
+          curl -X POST https://news30.live/api/cron/ingest \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
