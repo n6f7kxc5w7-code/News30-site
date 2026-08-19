@@ -1,0 +1,12 @@
+name: Nudge worker
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poke process endpoint
+        run: 'curl -sS -L -X POST https://www.news30.live/api/cron/process -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"'
