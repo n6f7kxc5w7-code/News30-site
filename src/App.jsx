@@ -1405,6 +1405,7 @@ const CSS2 = `
 .gm-note{font-size:11.5px;color:#80868b;margin-top:18px;line-height:1.55;text-align:left}
 .gm-cancel{margin-top:12px;color:#1a73e8;font-weight:500;font-size:14px;padding:8px 16px;border-radius:999px}
 .gm-cancel:hover{background:#f0f6ff}
+.gm .brand{background:var(--bg);border-radius:12px;padding:10px 16px;display:inline-flex;margin-bottom:4px}
 .gm-in{width:100%;border:1px solid #dadce0;border-radius:12px;padding:12px 14px;font-size:15px;color:#1f1f1f;background:#fff;margin-top:10px;transition:border-color .15s}
 .gm-in:focus{border-color:#1a73e8}
 .gm-in::placeholder{color:#80868b}
