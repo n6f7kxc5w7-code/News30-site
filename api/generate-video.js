@@ -408,15 +408,25 @@ function buildFilterComplex(imagePaths, assPath, fontsDir, totalSeconds) {
 /* ──────────────────────────────  HANDLER  ────────────────────────────── */
 
 export default async function handler(req, res) {
-    /* Locked for the same reason as generate-audio: Pexels calls plus the
-     render itself, all billable, all previously reachable by anyone. */
+  /* Locked for the same reason as generate-audio: Pexels calls, Supabase
+     storage and a full FFmpeg render, all billable, all previously
+     reachable by anyone who found the URL.
+
+     process.js calls this internally with x-pipeline-secret (the header
+     that also bypasses the rate limit below); a bearer token covers any
+     other legitimate caller. Anything else gets a 401. */
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     console.error("[generate-video] CRON_SECRET not configured — refusing to run");
     res.status(500).json({ error: "Not configured" });
     return;
   }
-  if (req.headers.authorization !== "Bearer " + secret) {
+  const pipelineSecret = process.env.PIPELINE_SECRET || secret;
+  const bearerOk = req.headers.authorization === "Bearer " + secret;
+  const pipelineOk =
+    req.headers["x-pipeline-secret"] === secret ||
+    req.headers["x-pipeline-secret"] === pipelineSecret;
+  if (!bearerOk && !pipelineOk) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
