@@ -160,19 +160,28 @@ async function generateScript(headline, category, apiKey) {
 }
 
 export default async function handler(req, res) {
-    /* This endpoint spends money on every call — Fish Audio narration, and
-     it's the entry point to the whole render chain. It used to be open to
-     anyone who found the URL, which meant a single person with curl could
-     drain the month's budget in an afternoon. Same bearer check as the
-     cron endpoints: process.js already sends it, nothing else should be
-     calling this. */
+  /* This endpoint spends money on every call — DeepSeek, then Fish Audio
+     narration billed per character — and it's the entry point to the
+     whole render chain. It used to be reachable by anyone who found the
+     URL, which meant one person with curl could drain the month's budget
+     in an afternoon.
+
+     Two callers are legitimate. process.js sends x-pipeline-secret (the
+     same header that bypasses the rate limit further down), and anything
+     calling in from outside the pipeline would use a bearer token. Accept
+     either, reject everything else. */
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     console.error("[generate-audio] CRON_SECRET not configured — refusing to run");
     res.status(500).json({ error: "Not configured" });
     return;
   }
-  if (req.headers.authorization !== "Bearer " + secret) {
+  const pipelineSecret = process.env.PIPELINE_SECRET || secret;
+  const bearerOk = req.headers.authorization === "Bearer " + secret;
+  const pipelineOk =
+    req.headers["x-pipeline-secret"] === secret ||
+    req.headers["x-pipeline-secret"] === pipelineSecret;
+  if (!bearerOk && !pipelineOk) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
