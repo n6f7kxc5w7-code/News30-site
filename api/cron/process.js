@@ -182,17 +182,53 @@ export default async function handler(req, res) {
         .eq("id", story.id);
     }
 
-    // Chain to the next story. Fire-and-forget — waiting would nest the
-    // whole remaining queue inside this one request's time budget.
-    fetch(base + "/api/cron/process", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + secret,
-        "x-chain-depth": String(chainDepth + 1),
-      },
-    }).catch(() => {});
+    // ── Chain to the next story ─────────────────────────────────────
+    // This used to be a bare `fetch(...).catch(() => {})` with no await,
+    // immediately followed by res.status(200). That does not work on
+    // Vercel: the platform freezes the function the moment the response
+    // is sent, so an in-flight request that hasn't completed its
+    // handshake is killed. Whether the next link fired came down to
+    // whether the socket happened to open in time — which is why the
+    // queue drained a story or two and then sat still until the next
+    // ingest kicked it hours later.
+    //
+    // Same fix ingest.js already uses for its own worker kick: await
+    // long enough to confirm the request was ACCEPTED, then stop
+    // waiting. AbortController cancels our wait, not the next
+    // invocation — that keeps running server-side regardless.
+    const kickController = new AbortController();
+    const kickTimeout = setTimeout(() => kickController.abort(), 5000);
 
-    res.status(200).json({ ok: true, processed: story.id });
+    try {
+      const kickRes = await fetch(base + "/api/cron/process", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + secret,
+          "x-chain-depth": String(chainDepth + 1),
+        },
+        signal: kickController.signal,
+      });
+      clearTimeout(kickTimeout);
+      if (!kickRes.ok) {
+        console.error("[process] chain link rejected at depth", chainDepth + 1, ":", kickRes.status);
+      } else {
+        console.log("[process] chain link accepted at depth", chainDepth + 1);
+      }
+    } catch (kickErr) {
+      clearTimeout(kickTimeout);
+      if (kickErr.name === "AbortError") {
+        // Expected and fine: the next story is already rendering and
+        // won't answer within 5s. The chain is alive; we just stopped
+        // watching it.
+        console.log("[process] chain link sent, next story still rendering after 5s (normal)");
+      } else {
+        // The chain is genuinely broken here — the queue will now sit
+        // until the next ingest kicks it. Worth seeing in the logs.
+        console.error("[process] chain link failed to send at depth", chainDepth + 1, ":", kickErr);
+      }
+    }
+
+    res.status(200).json({ ok: true, processed: story.id, depth: chainDepth });
   } catch (e) {
     console.error("[process] fatal:", e);
     res.status(500).json({ error: "Worker failed" });
