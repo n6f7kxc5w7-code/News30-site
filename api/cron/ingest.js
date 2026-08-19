@@ -230,29 +230,28 @@ export default async function handler(req, res) {
     return;
   }
 
-    const supabase = createClient(supabaseUrl, serviceKey);
-      const summary = {};
+  const supabase = createClient(supabaseUrl, serviceKey);
+  const summary = {};
 
-       // Anything still waiting after 24h is no longer news — expire it rather
-       // than letting the queue grow without bound. process.js only picks up
-      // `pending`, so this is what stops the worker rendering two-day-old
-      // stories while genuinely fresh ones sit behind them in the queue.
-      try {
-        const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-        const { data: expired, error: expireErr } = await supabase
-          .from("published_stories")
-          .update({ status: "expired", updated_at: new Date().toISOString() })
-          .eq("status", "pending")
-          .lt("created_at", cutoff)
-          .select("id");
-        if (expireErr) throw expireErr;
-        summary.expired = (expired || []).length;
-        console.log("[ingest] expired stale pending rows:", summary.expired);
-      } catch (e) {
-        // Non-fatal: a failed cleanup shouldn't stop today's ingest.
-        console.error("[ingest] expiry sweep failed:", e);
+  // Anything still waiting after 24h is no longer news — expire it rather
+  // than letting the queue grow without bound. process.js only picks up
+  // `pending`, so this is what stops the worker rendering two-day-old
+  // stories while genuinely fresh ones sit behind them in the queue.
+  try {
+    const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const { data: expired, error: expireErr } = await supabase
+      .from("published_stories")
+      .update({ status: "expired", updated_at: new Date().toISOString() })
+      .eq("status", "pending")
+      .lt("created_at", cutoff)
+      .select("id");
+    if (expireErr) throw expireErr;
+    summary.expired = (expired || []).length;
+    console.log("[ingest] expired stale pending rows:", summary.expired);
+  } catch (e) {
+    // Non-fatal: a failed cleanup shouldn't stop today's ingest.
+    console.error("[ingest] expiry sweep failed:", e);
   }
-
 
   try {
     for (const [category, apiCategory] of Object.entries(CATEGORY_MAP)) {
@@ -293,7 +292,8 @@ export default async function handler(req, res) {
       // ignoreDuplicates means a story already queued or published stays
       // as it is — this cron runs repeatedly and must not re-render
       // yesterday's news or reset a row mid-generation.
-            // .select() makes the upsert return the rows it actually wrote, so
+      //
+      // .select() makes the upsert return the rows it actually wrote, so
       // `inserted` reflects reality — `rows.length` counts what we tried,
       // which stays cheerfully constant even when every write is failing.
       const { data: written, error } = await supabase
@@ -303,8 +303,7 @@ export default async function handler(req, res) {
 
       if (error) throw error;
       summary[category] = { considered: rows.length, inserted: (written || []).length };
-
-      
+    }
 
     // Kick the worker. This is still fire-and-forget in spirit — we do
     // NOT wait for the actual render, which can take up to process.js's
