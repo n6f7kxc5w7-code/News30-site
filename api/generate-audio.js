@@ -160,6 +160,23 @@ async function generateScript(headline, category, apiKey) {
 }
 
 export default async function handler(req, res) {
+    /* This endpoint spends money on every call — Fish Audio narration, and
+     it's the entry point to the whole render chain. It used to be open to
+     anyone who found the URL, which meant a single person with curl could
+     drain the month's budget in an afternoon. Same bearer check as the
+     cron endpoints: process.js already sends it, nothing else should be
+     calling this. */
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    console.error("[generate-audio] CRON_SECRET not configured — refusing to run");
+    res.status(500).json({ error: "Not configured" });
+    return;
+  }
+  if (req.headers.authorization !== "Bearer " + secret) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
