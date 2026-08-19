@@ -85,7 +85,7 @@ const supabase = (CONFIG.DATABASE.SUPABASE_URL && CONFIG.DATABASE.SUPABASE_ANON_
 
 const supabaseAuth = {
   configured() { return !!supabase; },
-  async signInWithGoogle() {
+    async signInWithGoogle() {
     if (!supabase) throw new Error("Supabase not configured");
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
@@ -93,6 +93,32 @@ const supabaseAuth = {
     });
     if (error) throw error;
   },
+  /* Email + password. Supabase hashes the password server-side (bcrypt)
+     and issues the same session a social login would, so auth.uid() and
+     every RLS policy keep working unchanged. */
+  async signUpWithEmail(email, password) {
+    if (!supabase) throw new Error("Supabase not configured");
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+    /* With "Confirm email" off, `session` is populated immediately and
+       onChange fires. If it's ever switched on, session is null here and
+       the caller needs to tell the user to go and check their inbox. */
+    return { user: data.user, needsConfirmation: !data.session };
+  },
+  async signInWithEmail(email, password) {
+    if (!supabase) throw new Error("Supabase not configured");
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return data.user;
+  },
+  async sendPasswordReset(email) {
+    if (!supabase) throw new Error("Supabase not configured");
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    if (error) throw error;
+  },
+
   async getUser() {
     if (!supabase) return null;
     const { data } = await supabase.auth.getUser();
@@ -1379,6 +1405,22 @@ const CSS2 = `
 .gm-note{font-size:11.5px;color:#80868b;margin-top:18px;line-height:1.55;text-align:left}
 .gm-cancel{margin-top:12px;color:#1a73e8;font-weight:500;font-size:14px;padding:8px 16px;border-radius:999px}
 .gm-cancel:hover{background:#f0f6ff}
+.gm-in{width:100%;border:1px solid #dadce0;border-radius:12px;padding:12px 14px;font-size:15px;color:#1f1f1f;background:#fff;margin-top:10px;transition:border-color .15s}
+.gm-in:focus{border-color:#1a73e8}
+.gm-in::placeholder{color:#80868b}
+.gm-submit{width:100%;margin-top:14px;background:#1a73e8;color:#fff;font-weight:600;font-size:15px;border-radius:999px;padding:12px;transition:opacity .15s,transform .1s}
+.gm-submit:hover{opacity:.92}
+.gm-submit:active{transform:scale(.99)}
+.gm-submit:disabled{opacity:.55;cursor:default}
+.gm-err{margin-top:12px;font-size:13px;color:#c5221f;background:#fce8e6;border-radius:10px;padding:9px 12px;text-align:left}
+.gm-ok{margin-top:12px;font-size:13px;color:#137333;background:#e6f4ea;border-radius:10px;padding:9px 12px;text-align:left}
+.gm-switch{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:14px}
+.gm-switch button{color:#1a73e8;font-weight:500;font-size:13.5px;padding:4px 6px;border-radius:8px}
+.gm-switch button:hover{background:#f0f6ff}
+.gm-switch span{color:#80868b;font-size:13px}
+.gm-or{display:flex;align-items:center;gap:12px;margin:18px 0 14px;color:#80868b;font-size:12.5px}
+.gm-or::before,.gm-or::after{content:"";flex:1;height:1px;background:#dadce0}
+
 
 /* ── toasts ── */
 .toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:100;align-items:center;pointer-events:none}
@@ -1887,59 +1929,157 @@ function ProfileMenu({ user, data, onGoogle, onSignOut, onSaved, onClose }) {
   );
 }
 
-/* Google sign-in modal — 🔌 GOOGLE OAUTH via Supabase Auth.
-   Real path: tapping the button calls supabaseAuth.signInWithGoogle(),
-   which redirects to Google and back through Supabase's own callback;
-   App's supabaseAuth.onChange() listener picks up the resulting
-   session (see App below) and calls onPick indirectly via runLoginFlow.
-   Demo path: only shown if Supabase isn't configured yet, so sign-in
-   stays testable before the backend is wired up.                     */
+/* 🔌 AUTH — email + password via Supabase Auth.
+   Google OAuth is still wired up underneath, but hidden while the Google
+   Cloud project suspension blocks it — flip SHOW_GOOGLE_SIGNIN back to
+   true once the appeal clears and the button returns with no other work. */
+const SHOW_GOOGLE_SIGNIN = false;
+
 function GoogleModal({ onPick, onClose }) {
+  const [mode, setMode] = React.useState("signin"); // signin | signup | reset
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [notice, setNotice] = React.useState("");
   const configured = supabaseAuth.configured();
 
-  const continueWithGoogle = async () => {
+  const reset = (next) => {
+    setMode(next); setError(""); setNotice(""); setPassword("");
+  };
+
+  const submit = async () => {
+    setError(""); setNotice("");
+    const mail = email.trim();
+    if (!mail) return setError("Enter your email address.");
+
+    if (mode === "reset") {
+      setBusy(true);
+      try {
+        await supabaseAuth.sendPasswordReset(mail);
+        setNotice("If that address has an account, a reset link is on its way.");
+      } catch (e) {
+        setError(e?.message || "Could not send the reset email.");
+      }
+      setBusy(false);
+      return;
+    }
+
+    /* Supabase enforces a 6-character minimum server-side; checking here
+       just saves a round trip and gives a clearer message than the API's. */
+    if (password.length < 6) return setError("Password must be at least 6 characters.");
+
     setBusy(true);
     try {
-      await supabaseAuth.signInWithGoogle(); // redirects away from the page
+      if (mode === "signup") {
+        const { needsConfirmation } = await supabaseAuth.signUpWithEmail(mail, password);
+        if (needsConfirmation) {
+          setNotice("Check your email to confirm your account, then sign in.");
+          setBusy(false);
+          return;
+        }
+      } else {
+        await supabaseAuth.signInWithEmail(mail, password);
+      }
+      /* Success: App's supabaseAuth.onChange listener picks up the new
+         session and runs the whole login flow, so just close. */
+      onClose();
     } catch (e) {
+      const msg = e?.message || "Something went wrong.";
+      /* Supabase returns "Invalid login credentials" for both a wrong
+         password and an unknown email — deliberately, so the form can't
+         be used to discover which addresses have accounts. Keep it vague. */
+      setError(/invalid login/i.test(msg) ? "Email or password is incorrect." : msg);
       setBusy(false);
     }
   };
 
+  const onKey = (e) => { if (e.key === "Enter") submit(); };
+
   return (
     <div className="gm-scrim" onClick={onClose} role="button" aria-label="Close sign-in">
       <div className="gm" onClick={(e) => e.stopPropagation()} role="dialog">
-        <GoogleG size={30} />
-        <h4>{configured ? "Sign in to News30" : "Choose an account"}</h4>
-        <p>to continue to <b style={{ color: "#1f1f1f" }}>News30</b></p>
+        <Brand height={26} />
+        <h4>
+          {mode === "signup" ? "Create your account"
+            : mode === "reset" ? "Reset your password"
+            : "Sign in to News30"}
+        </h4>
+        <p>
+          {mode === "signup" ? "Track your streak, points and quiz accuracy."
+            : mode === "reset" ? "We'll email you a link to set a new one."
+            : "Welcome back."}
+        </p>
 
-        {configured ? (
-          <React.Fragment>
-            <button className="gbtn" onClick={continueWithGoogle} disabled={busy} style={{ margin: "14px auto 0" }}>
-              <GoogleG size={18} /> {busy ? "Redirecting…" : "Continue with Google"}
-            </button>
-            <div className="gm-note">
-              Real Google sign-in via Supabase Auth. Your streak, points and quiz
-              accuracy attach to this account, protected by row-level security.
-            </div>
-          </React.Fragment>
+        {!configured ? (
+          <div className="gm-note">
+            Supabase isn't configured yet. Set VITE_SUPABASE_URL and
+            VITE_SUPABASE_ANON_KEY, then sign-in goes live.
+          </div>
         ) : (
           <React.Fragment>
-            {MOCK_GOOGLE_ACCOUNTS.map((a) => (
-              <button key={a.email} className="gm-acc" onClick={() => onPick(a)}>
-                <span className="gm-av" style={{ background: a.color }}>{a.name[0]}</span>
-                <span>
-                  <b>{a.name}</b>
-                  <span>{a.email}</span>
-                </span>
-              </button>
-            ))}
-            <div className="gm-note">
-              Supabase isn't configured yet, so this is the demo chooser. It goes
-              real once VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set and
-              Google is enabled in Supabase → Authentication → Sign In / Providers.
+            <input
+              className="gm-in"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              placeholder="Email address"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={onKey}
+              aria-label="Email address"
+            />
+            {mode !== "reset" && (
+              <input
+                className="gm-in"
+                type="password"
+                autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={onKey}
+                aria-label="Password"
+              />
+            )}
+
+            {error && <div className="gm-err">{error}</div>}
+            {notice && <div className="gm-ok">{notice}</div>}
+
+            <button className="gm-submit" onClick={submit} disabled={busy}>
+              {busy ? "Please wait…"
+                : mode === "signup" ? "Create account"
+                : mode === "reset" ? "Send reset link"
+                : "Sign in"}
+            </button>
+
+            <div className="gm-switch">
+              {mode === "signin" && (
+                <React.Fragment>
+                  <button onClick={() => reset("signup")}>Create an account</button>
+                  <span>·</span>
+                  <button onClick={() => reset("reset")}>Forgot password?</button>
+                </React.Fragment>
+              )}
+              {mode === "signup" && (
+                <button onClick={() => reset("signin")}>Already have an account? Sign in</button>
+              )}
+              {mode === "reset" && (
+                <button onClick={() => reset("signin")}>Back to sign in</button>
+              )}
             </div>
+
+            {SHOW_GOOGLE_SIGNIN && (
+              <React.Fragment>
+                <div className="gm-or"><span>or</span></div>
+                <button
+                  className="gbtn"
+                  style={{ margin: "0 auto" }}
+                  onClick={() => supabaseAuth.signInWithGoogle().catch(() => {})}
+                >
+                  <GoogleG size={18} /> Continue with Google
+                </button>
+              </React.Fragment>
+            )}
           </React.Fragment>
         )}
 
