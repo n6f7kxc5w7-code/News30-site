@@ -2975,13 +2975,6 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
             Quiz
           </div>
           <div className="rail-btn">
-            <button className="ibtn" onClick={() => setPanel(panel === "video" ? null : "video")}
-              style={panel === "video" ? { background: "var(--hover)" } : null} aria-label="Generate video">
-              <Icon name="sparkle" size={23} />
-            </button>
-            Video
-          </div>
-          <div className="rail-btn">
             <button className="ibtn" onClick={doShare} aria-label="Share">
               <Icon name="share" size={23} />
             </button>
@@ -3001,7 +2994,6 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
 
       {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} />}
       {panel === "quiz" && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
-      {panel === "video" && <VideoGenPanel story={story} onClose={() => setPanel(null)} />}
     </div>
   );
 }
