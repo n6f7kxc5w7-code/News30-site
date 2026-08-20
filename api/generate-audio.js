@@ -6,9 +6,9 @@
 //
 // Switched to DeepSeek after Gemini's suspension went unanswered for
 // over a week and Claude proved too expensive for this project's
-// £50/month ceiling. This task — a 70-word script plus three search
-// phrases — doesn't need frontier-model reasoning, which is what makes
-// DeepSeek's price point a good fit here specifically.
+// £50/month ceiling. This task — a 70-word script, three search phrases
+// and three quiz questions — doesn't need frontier-model reasoning,
+// which is what makes DeepSeek's price point a good fit here specifically.
 //
 // Flow: create a video_jobs row -> (optionally generate the script via
 // DeepSeek) -> call Fish Audio TTS -> upload the MP3 to Supabase
@@ -26,17 +26,31 @@
 // on the job row and read directly by generate-video.js. The keyword
 // map stays there as a fallback for when this returns nothing usable.
 //
+// ─── WHY QUIZ QUESTIONS COME FROM HERE TOO ───────────────────────────
+// Same argument, same call. The front end's fallback generator can only
+// ask about metadata already visible on the card — which outlet ran the
+// story, which category it sits in — so a user could score full marks
+// without watching. Questions written from the script test whether the
+// video actually landed. Riding along in the existing request keeps
+// this effectively free: one call produces narration, visuals and
+// comprehension.
+//
 // Setup in Vercel → Settings → Environment Variables:
 //   FISH_API_KEY, FISH_VOICE_ID, SUPABASE_SERVICE_ROLE_KEY,
 //   DEEPSEEK_API_KEY
 // Reuses VITE_SUPABASE_URL (just the project URL, not a secret).
+//
+// Requires: alter table video_jobs add column if not exists quiz jsonb;
 
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
 
 const DEEPSEEK_MODEL = "deepseek-chat";
 const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
-const MAX_TOKENS = 700;
+// Raised from 700: the response now carries three questions with four
+// options each on top of the script, and a truncated response fails the
+// JSON parse outright rather than degrading gracefully.
+const MAX_TOKENS = 1400;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -52,7 +66,7 @@ const SCRIPT_PROMPT = `You write short vertical news videos.
 
 Return ONLY valid JSON. No markdown fences, no preamble, no trailing text.
 Exact shape:
-{"script":"...","imageQueries":["...","...","..."]}
+{"script":"...","imageQueries":["...","...","..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
 
 script: 65-75 words of spoken narration for a 30-second vertical news
 video, based on the headline below. Plain spoken sentences only — no
@@ -73,15 +87,29 @@ represent this story on Pexels. Rules:
   finished video does not show three near-identical shots.
 - No proper nouns. No dates. No numbers.
 
+quiz: exactly 3 multiple-choice questions testing whether someone
+actually took in the script you just wrote. Rules:
+- Every question must be answerable from the script alone. Do not ask
+  about anything the script does not state.
+- Ask about substance: what happened, to whom, what figure was given,
+  what happens next. NEVER ask which outlet reported it, what category
+  it belongs to, or what the headline was — those test the interface,
+  not the news, and can be answered without watching.
+- Exactly 4 options each. All four must be plausible to someone who
+  half-watched: same type of thing, same rough magnitude. An option
+  that is obviously absurd gives the answer away for free.
+- "correct" is the 0-based index of the right option.
+- Vary which index is correct across the three questions.
+
 Example for the headline "Israel and Hamas agree ceasefire framework":
-{"script":"...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"]}
+{"script":"...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
 
 Example for the headline "Norway's sovereign wealth fund posts record returns":
-{"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"]}`;
+{"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}`;
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
-// here should cost us the image queries, not the whole render.
+// in the extras should cost us the extras, not the whole render.
 function parseScriptResponse(raw) {
   if (!raw) return null;
 
@@ -109,7 +137,28 @@ function parseScriptResponse(raw) {
         .slice(0, 3)
     : EMPTY_QUERIES;
 
-  return { script: parsed.script.trim(), imageQueries: queries };
+  // Validate every question rather than trusting the shape. A question
+  // with three options, or a `correct` index pointing past the end of
+  // the array, would render as a broken quiz in the player — better to
+  // drop it here and let the front end fall back to its own questions.
+  const quiz = Array.isArray(parsed.quiz)
+    ? parsed.quiz
+        .filter((item) =>
+          item &&
+          typeof item.q === "string" && item.q.trim().length > 5 &&
+          Array.isArray(item.opts) && item.opts.length === 4 &&
+          item.opts.every((o) => typeof o === "string" && o.trim()) &&
+          Number.isInteger(item.correct) && item.correct >= 0 && item.correct < 4
+        )
+        .map((item) => ({
+          q: item.q.trim(),
+          opts: item.opts.map((o) => o.trim()),
+          correct: item.correct,
+        }))
+        .slice(0, 3)
+    : [];
+
+  return { script: parsed.script.trim(), imageQueries: queries, quiz };
 }
 
 async function generateScript(headline, category, apiKey) {
@@ -154,6 +203,9 @@ async function generateScript(headline, category, apiKey) {
 
   if (!parsed.imageQueries.length) {
     console.warn("[generate-audio] DeepSeek returned no usable imageQueries; falling back to keyword map");
+  }
+  if (!parsed.quiz.length) {
+    console.warn("[generate-audio] DeepSeek returned no usable quiz; front end will fall back to generated questions");
   }
 
   return parsed;
@@ -213,11 +265,12 @@ export default async function handler(req, res) {
   if (!(await enforceRateLimit(req, res, "generate-audio", 5, 60))) return;
 
   // Two accepted call shapes:
-  //   { storyId, script }                       — script supplied (test harness)
-  //   { storyId, headline, category }           — generate script + queries via DeepSeek
+  //   { storyId, script }                  — script supplied (test harness)
+  //   { storyId, headline, category }      — generate script + queries + quiz
   // Passing a script explicitly always wins, so the test page keeps
   // working exactly as before and stays useful for isolating TTS issues
-  // without spending an AI call.
+  // without spending an AI call. Note that path produces no quiz — there
+  // is no generated script for the model to write questions from.
   const { storyId, script: providedScript, headline, category, imageQueries: providedQueries } = req.body || {};
 
   if (!storyId) {
@@ -267,24 +320,27 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1) Script + image queries.
+    // 1) Script + image queries + quiz.
     let script = providedScript;
     let imageQueries = Array.isArray(providedQueries) ? providedQueries.slice(0, 3) : [];
+    let quiz = [];
 
     if (!script) {
       const generated = await generateScript(headline, category, deepseekKey);
       script = generated.script;
       if (!imageQueries.length) imageQueries = generated.imageQueries;
+      quiz = generated.quiz;
     }
 
-    // Persist both before TTS — if narration fails, the script and
-    // queries survive on the row and the job can be retried cheaply
-    // without paying for another AI call.
+    // Persist all three before TTS — if narration fails, the script,
+    // queries and questions survive on the row and the job can be
+    // retried cheaply without paying for another AI call.
     await supabase
       .from("video_jobs")
       .update({
         script,
         image_queries: imageQueries.length ? imageQueries : null,
+        quiz: quiz.length ? quiz : null,
         status: "generating_audio",
         updated_at: new Date().toISOString(),
       })
@@ -334,7 +390,7 @@ export default async function handler(req, res) {
       .update({ status: "audio_ready", audio_url: audioUrl, updated_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries });
+    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, quiz });
   } catch (e) {
     console.error("[generate-audio] failed:", e);
     await supabase
