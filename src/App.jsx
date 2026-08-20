@@ -1306,6 +1306,7 @@ const CSS2 = `
 .rail-btn .ibtn{background:var(--raised)}
 .rail-btn .ibtn:hover{background:var(--hover)}
 .rail-btn .liked{color:var(--red)}
+.rail-btn .saved-on{color:var(--blue)}
 .pl-nav{position:absolute;right:26px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:14px;z-index:3}
 .pl-nav .ibtn{width:52px;height:52px}
 .pl-nav .ibtn:disabled{opacity:.32;cursor:default}
@@ -3015,6 +3016,12 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     if (!liked) setHeartKey((k) => k + 1);
     dispatch({ type: "LIKE_TOGGLED", storyId: story.id }); // 🔌 engagement event
   };
+const isSaved = userData.engagement.savedIds.includes(story.id);
+  const doSave = () => {
+    dispatch({ type: "SAVE_TOGGLED", storyId: story.id });
+    toast(isSaved ? "Removed from Saved" : "Saved to your stories", "bookmark");
+  };
+
   const doShare = async () => {
     const url = window.location.origin + window.location.pathname + "#/story/" + story.id;
     const ok = await copyText(url);
@@ -3094,6 +3101,14 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
         </div>
 
         <div className="pl-rail">
+                     <div className="rail-btn">
+            <button className={cls("ibtn", isSaved && "saved-on")} onClick={doSave}
+              aria-label={isSaved ? "Remove from saved" : "Save story"}>
+              <Icon name="bookmark" size={23} filled={isSaved} />
+            </button>
+            {isSaved ? "Saved" : "Save"}
+          </div>
+
           <div className="rail-btn">
             <button className={cls("ibtn", liked && "liked")} onClick={doLike} aria-label="Like">
               <span key={heartKey} className={heartKey ? "heart-anim" : undefined} style={{ display: "flex" }}>
