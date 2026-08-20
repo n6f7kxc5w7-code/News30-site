@@ -19,6 +19,8 @@
 // endless loop spending money.
 //
 // Security: requires CRON_SECRET, same as ingest.
+//
+// Requires: alter table published_stories add column if not exists quiz jsonb;
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -107,8 +109,8 @@ export default async function handler(req, res) {
     try {
       // ── Script + narration ──────────────────────────────────────
       // Passing headline and category (not a script) is what triggers
-      // the Gemini path, which returns the script AND the stock-photo
-      // search phrases in one call.
+      // the DeepSeek path, which returns the script, the stock-photo
+      // search phrases AND the quiz questions in one call.
       const audioRes = await fetch(base + "/api/generate-audio", {
         method: "POST",
         headers: {
@@ -148,12 +150,17 @@ export default async function handler(req, res) {
       // `ready`, which is the exact condition the RLS read policy and
       // the front-end query both check. There is no window where a
       // half-finished story is visible.
+      //
+      // The quiz is copied onto the story row rather than left on the
+      // job row, because the front end only ever reads published_stories
+      // — a join would mean a second query on every feed load.
       await supabase
         .from("published_stories")
         .update({
           status: "ready",
           script: audioData.script,
           image_queries: audioData.imageQueries || null,
+          quiz: (audioData.quiz && audioData.quiz.length) ? audioData.quiz : null,
           audio_url: audioData.audioUrl,
           video_url: videoData.videoUrl,
           thumbnail_url: videoData.thumbnailUrl || null,
