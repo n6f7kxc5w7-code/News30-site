@@ -1297,7 +1297,7 @@ const CSS2 = `
 .pl-sub{margin-top:9px;font-size:12.5px;color:#e2e2e2;display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;text-shadow:0 1px 6px rgba(0,0,0,.6)}
 .pl-prog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.22);z-index:2}
 .pl-prog i{display:block;height:100%;background:#fff;transition:width .12s linear}
-.pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pop .2s;pointer-events:none}
+
 .pl-close{position:absolute;left:18px;top:14px;z-index:3}
 .pl-close .ibtn,.pl-nav .ibtn{background:var(--raised)}
 .pl-rail{display:flex;flex-direction:column;justify-content:flex-end;gap:20px;padding:0 4px 6px 18px}
@@ -1310,7 +1310,7 @@ const CSS2 = `
 .pl-nav .ibtn{width:52px;height:52px}
 .pl-nav .ibtn:disabled{opacity:.32;cursor:default}
 .pl-nav .ibtn:disabled:hover{background:var(--raised)}
-
+.pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
 /* ── slide panel (summary / quiz — one shared shell) ── */
 .pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:#212121;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.45);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
 .pnl-h{display:flex;align-items:center;gap:6px;padding:11px 10px 11px 18px;border-bottom:1px solid var(--line2);flex:none}
@@ -1430,6 +1430,7 @@ const CSS2 = `
 /* ── keyframes ── */
 @keyframes fade{from{opacity:0}}
 @keyframes pop{from{opacity:0;transform:scale(.96)}}
+@keyframes pp-flash{0%{opacity:0;transform:translate(-50%,-50%) scale(.8)}22%{opacity:1;transform:translate(-50%,-50%) scale(1)}65%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1.18)}}
 @keyframes slide-l{from{transform:translateX(64px);opacity:0}}
 @keyframes slide-r{from{transform:translateX(-100%)}}
 @keyframes slide-up{from{transform:translateY(100%)}}
