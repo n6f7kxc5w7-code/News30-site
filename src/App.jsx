@@ -628,7 +628,9 @@ function mapPublishedStory(row) {
     video_url: row.video_url || null,
     thumbnail_url: row.thumbnail_url || null,
     script: row.script || null,
+      quiz: Array.isArray(row.quiz) && row.quiz.length ? row.quiz : null,
   };
+
   LIVE_CACHE.set(story.id, story);
   return story;
 }
@@ -639,7 +641,8 @@ const storiesService = {
     try {
       const { data, error } = await supabase
         .from("published_stories")
-        .select("id, headline, source, category, article_url, article_published, created_at, script, audio_url, video_url, thumbnail_url, duration_seconds, status")
+         .select("id, headline, source, category, article_url, article_published, created_at, script, audio_url, video_url, thumbnail_url, duration_seconds, status, quiz")
+
         .eq("status", "ready")
         .not("video_url", "is", null)
         .order("created_at", { ascending: false })
@@ -2578,7 +2581,13 @@ function shuffleSeeded(arr, rnd) {
 }
 
 function getQuiz(story) {
+  /* Questions written by DeepSeek from the actual script, so they test
+     whether someone took in the story. The generated fallback below
+     only asks about outlet, category and tagline — answerable off the
+     card without watching, which is worse than no quiz. */
+  if (story.quiz && story.quiz.length) return story.quiz;
   if (CURATED_QUIZ[story.id]) return CURATED_QUIZ[story.id];
+
   const rnd = seeded(story.seed + 5);
   const srcPool = shuffleSeeded((ARCH[story.category] || ARCH.geopolitics).sources.filter((s) => s !== story.source), rnd).slice(0, 3);
   const srcOpts = shuffleSeeded([story.source, ...srcPool], rnd);
