@@ -1,8 +1,8 @@
 // /api/generate-video.js
 // 🔌 STEP 3 OF THE VIDEO PIPELINE — FFmpeg version (free, self-hosted).
-// Downloads real Pexels images + the Fish Audio narration into /tmp,.
-// uses FFmpeg (via ffmpeg-static) to assemble a 720x1280 video with a
-// gentle Ken Burns zoom per image and burned-in captions, muxes in the
+// Downloads real imagery + the Fish Audio narration into /tmp, uses
+// FFmpeg (via ffmpeg-static) to assemble a 720x1280 video with a gentle
+// Ken Burns zoom per image and burned-in captions, muxes in the
 // narration, then uploads the finished MP4 to Supabase Storage.
 //
 // Required Vercel env vars (server-only, no "VITE_" prefix):
@@ -37,18 +37,49 @@
 //    matched wheat. Now matched on word boundaries with a scoring pass
 //    across all categories instead of first-match-wins.
 //
-// 4. IMAGE QUERIES NOW COME FROM GEMINI. The keyword map can only
+// 4. IMAGE QUERIES COME FROM THE MODEL. The keyword map can only
 //    recognise vocabulary it was written for — headlines like "Israel
 //    and Hamas agree ceasefire framework" or "Bitcoin falls after ETF
 //    outflows" score zero triggers and fall through to generic photos.
-//    generate-audio.js now asks Gemini for three stock-photo search
+//    generate-audio.js asks DeepSeek for three stock-photo search
 //    phrases in the same call that produces the script (no extra
-//    round-trip, which is what made the old step-3 Gemini call
-//    untenable against the 60s limit) and stores them on the job row.
-//    This function reads job.image_queries first and only falls back to
-//    the map below when they're missing or unusable.
+//    round-trip, which is what made a separate step-3 AI call untenable
+//    against the 60s limit) and stores them on the job row. This
+//    function reads job.image_queries first and only falls back to the
+//    map below when they're missing or unusable.
 //
-//    Requires: alter table video_jobs add column if not exists image_queries jsonb;
+// 5. NAMED ENTITIES NOW COME FROM WIKIMEDIA, NOT PEXELS. This is the
+//    big one. Pexels is a STOCK library: it has photographs of models,
+//    offices, skylines and crowds, and no photographs whatsoever of
+//    Trump, SpaceX, Anthropic, Real Madrid or any other named person,
+//    company or event. So a story about SpaceX would narrate SpaceX
+//    over five anonymous strangers in an office — which is worse than
+//    no illustration, because the mismatch is what makes a viewer
+//    swipe away.
+//
+//    Stories split cleanly into two kinds. THEMATIC ones (markets fall,
+//    protests spread, storms hit) are exactly what stock libraries are
+//    for. NAMED-ENTITY ones need a picture of the actual thing.
+//    Wikimedia Commons has the second kind — freely licensed photos of
+//    companies, politicians, landmarks, rockets — and costs nothing and
+//    needs no API key.
+//
+//    So: generate-audio.js now also returns any named entities in the
+//    story. Where they exist, this fetches one Commons image per entity
+//    and leads the video with them, then fills the remaining slots from
+//    Pexels for visual variety. Where there are none, behaviour is
+//    exactly as before.
+//
+//    Requires: alter table video_jobs add column if not exists entities jsonb;
+//              alter table video_jobs add column if not exists image_credits jsonb;
+//
+//    ⚠️ ATTRIBUTION: Commons images are freely licensed, not
+//    unencumbered. Public-domain and CC0 files need nothing. CC-BY and
+//    CC-BY-SA legally require crediting the author. This function
+//    filters to free licences and records the credit line for every
+//    image it uses on job.image_credits — put those in the video
+//    description when you upload. If that becomes a nuisance, tighten
+//    ACCEPTED_LICENCES below to the public-domain entries only.
 // ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -70,6 +101,11 @@ const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 25;
 
+// How many of the five slots entity photos may take. Capped at 3 so a
+// story about three companies still gets some visual variety rather
+// than five near-identical logo shots.
+const MAX_ENTITY_IMAGES = 3;
+
 // Only these origins may trigger a render. This endpoint spends real
 // money (Pexels quota, Supabase storage, function time), so it must not
 // be callable from arbitrary sites.
@@ -81,8 +117,8 @@ const ALLOWED_ORIGINS = [
 
 /* ───────────────────────── KEYWORD MATCHING ─────────────────────────
 
-   Each bucket now carries SEVERAL distinct search phrases rather than
-   one. Two reasons:
+   Each bucket carries SEVERAL distinct search phrases rather than one.
+   Two reasons:
 
    (a) Variety. Running one query and taking the top 5 gives five near
        identical photos, because stock libraries cluster visually
@@ -197,6 +233,121 @@ function getStockQueries(headline, category) {
   return CATEGORY_FALLBACK[(category || "").toLowerCase()] || GENERIC_FALLBACK;
 }
 
+/* ──────────────────── WIKIMEDIA COMMONS (named entities) ────────────
+
+   No API key, no quota worth worrying about, but Wikimedia asks that
+   automated clients identify themselves — an anonymous flood of
+   requests from a datacentre IP is what gets a range blocked.
+*/
+const WIKI_ENDPOINT = "https://commons.wikimedia.org/w/api.php";
+const WIKI_UA = "News30/1.0 (https://news30.live; automated news video pipeline)";
+
+// Below this the image is a thumbnail, an icon, or a flag sprite —
+// upscaling it to 720x1280 would look worse than a stock photo.
+const WIKI_MIN_WIDTH = 640;
+
+/* Commons hosts plenty of non-free material under fair-use-style
+   exemptions, and "freely licensed" is not the same as "no obligations".
+   These are the licences safe to use with a credit line; everything
+   else is skipped. Matched loosely because Commons' LicenseShortName
+   strings vary ("CC BY-SA 4.0", "CC BY 2.5", "Public domain"…). */
+const ACCEPTED_LICENCES = [
+  /^cc0/i,
+  /^cc[ -]by/i,          // covers CC BY and CC BY-SA, all versions
+  /public domain/i,
+  /^pd[ -]/i,
+];
+
+function licenceIsUsable(shortName) {
+  if (!shortName) return false;
+  return ACCEPTED_LICENCES.some((re) => re.test(shortName.trim()));
+}
+
+// Commons descriptions are HTML fragments. Strip tags for the credit
+// line — this ends up in a YouTube description, not a web page.
+function stripHtml(s) {
+  return String(s || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * One good photograph per entity. Deliberately one, not several: three
+ * different subjects beats three angles on the same logo, and the whole
+ * point of this path is that the viewer recognises what they're being
+ * told about.
+ *
+ * Returns [{ url, credit }] — credit is null for public-domain files.
+ */
+async function fetchWikimediaImages(entities, maxImages) {
+  const out = [];
+  const seenUrls = new Set();
+
+  for (const entity of entities) {
+    if (out.length >= maxImages) break;
+
+    try {
+      // `filetype:bitmap` keeps out SVG logos, PDFs and audio files,
+      // which Commons search happily returns otherwise and FFmpeg
+      // cannot read.
+      const url =
+        WIKI_ENDPOINT +
+        "?action=query&format=json" +
+        "&generator=search" +
+        "&gsrsearch=" + encodeURIComponent(entity + " filetype:bitmap") +
+        "&gsrnamespace=6" +          // File: namespace
+        "&gsrlimit=12" +
+        "&prop=imageinfo" +
+        "&iiprop=url|size|mime|extmetadata" +
+        "&iiurlwidth=1280";          // ask for a resized copy, not the 40MB original
+
+      const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
+      if (!res.ok) {
+        console.warn("[generate-video] Commons search failed for", entity, res.status);
+        continue;
+      }
+
+      const data = await res.json();
+      const pages = (data.query && data.query.pages) ? Object.values(data.query.pages) : [];
+
+      // Commons returns search results unordered in the pages object;
+      // `index` is the relevance ranking, so restore it.
+      pages.sort((a, b) => (a.index || 999) - (b.index || 999));
+
+      for (const page of pages) {
+        const info = page.imageinfo && page.imageinfo[0];
+        if (!info) continue;
+        if (!/^image\/(jpeg|png)$/i.test(info.mime || "")) continue;
+
+        const src = info.thumburl || info.url;
+        if (!src || seenUrls.has(src)) continue;
+        if ((info.thumbwidth || info.width || 0) < WIKI_MIN_WIDTH) continue;
+
+        const meta = info.extmetadata || {};
+        const licence = meta.LicenseShortName && meta.LicenseShortName.value;
+        if (!licenceIsUsable(licence)) continue;
+
+        const artist = stripHtml(meta.Artist && meta.Artist.value);
+        const title = (page.title || "").replace(/^File:/, "");
+        const needsCredit = !/^cc0|public domain|^pd[ -]/i.test(String(licence).trim());
+
+        seenUrls.add(src);
+        out.push({
+          url: src,
+          credit: needsCredit
+            ? title + (artist ? " by " + artist : "") + " — " + licence + ", via Wikimedia Commons"
+            : null,
+        });
+        break; // one per entity
+      }
+    } catch (e) {
+      // Never fatal. A failed Commons lookup just means this story is
+      // illustrated the old way.
+      console.warn("[generate-video] Commons lookup errored for", entity, String(e).slice(0, 120));
+    }
+  }
+
+  return out;
+}
+
 /* ────────────────────────── PEXELS FETCHING ────────────────────────── */
 
 function shuffle(arr) {
@@ -213,6 +364,8 @@ function shuffle(arr) {
 // makes genuine variety possible: asking for exactly 5 and taking all 5
 // means any duplicate or dud in that set has no replacement available.
 async function fetchPexelsImages(queries, count, apiKey, category) {
+  if (count <= 0) return [];
+
   const POOL_PER_QUERY = 15;
   const randomPage = () => 1 + Math.floor(Math.random() * 3);
 
@@ -270,21 +423,36 @@ async function fetchPexelsImages(queries, count, apiKey, category) {
     anyOrientation.forEach(addAll);
   }
 
-  if (pool.length < MIN_IMAGE_COUNT) {
-    throw new Error(
-      "Pexels returned only " + pool.length + " usable images for: " + queries.join(" / ")
-    );
-  }
-
   // Shuffle so two videos on the same topic don't open on the same shot,
   // then take what we need. Note we return however many unique photos we
-  // have (down to MIN_IMAGE_COUNT) — a 4-image video is better than a
-  // 5-image video with a duplicate in it.
+  // have — a shorter rotation is better than a repeated one.
   return shuffle(pool).slice(0, count).map((p) => p.url);
 }
 
+/**
+ * Entity photos first, then stock, alternating after the opener.
+ *
+ * The first frame is the one that decides whether someone keeps
+ * watching, so if we have a photograph of the actual subject it leads.
+ * After that they alternate: back-to-back Commons images tend to look
+ * like an encyclopedia entry, and back-to-back stock looks like a
+ * corporate explainer. Alternating reads as edited.
+ */
+function interleaveImages(entityUrls, stockUrls, total) {
+  const out = [];
+  let e = 0, s = 0;
+  if (entityUrls.length) out.push(entityUrls[e++]);
+  while (out.length < total && (e < entityUrls.length || s < stockUrls.length)) {
+    if (s < stockUrls.length) out.push(stockUrls[s++]);
+    if (out.length < total && e < entityUrls.length) out.push(entityUrls[e++]);
+  }
+  return out.slice(0, total);
+}
+
 async function downloadToFile(url, destPath) {
-  const res = await fetch(url);
+  // Commons will reject a request with no User-Agent; Pexels does not
+  // care. Sending it to both is simpler than branching.
+  const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
   if (!res.ok) throw new Error("Failed to download " + url + ": " + res.status);
   const buffer = Buffer.from(await res.arrayBuffer());
   await fs.writeFile(destPath, buffer);
@@ -502,25 +670,68 @@ export default async function handler(req, res) {
     // Images and audio don't depend on each other, so fetch both at once —
     // wall-clock time matters against Vercel's 60s function limit.
     const audioPath = path.join(workDir, "audio.mp3");
+    let imageCredits = [];
 
     const [imagePaths] = await Promise.all([
       (async () => {
-        // Prefer the search phrases Gemini produced alongside the script
-        // in generate-audio.js — it understands that "ceasefire framework"
-        // should look like a negotiation table, whereas the keyword map
-        // below can only recognise vocabulary it was written for.
-        // The map remains as a fallback so an unparseable or missing
-        // Gemini response degrades to the old behaviour instead of
-        // failing the render.
-        const fromGemini = Array.isArray(job.image_queries) ? job.image_queries : [];
-        const usingGemini = fromGemini.length > 0;
-        const queries = usingGemini ? fromGemini : getStockQueries(headline, category);
+        const entities = Array.isArray(job.entities)
+          ? job.entities.filter((e) => typeof e === "string" && e.trim()).slice(0, MAX_ENTITY_IMAGES)
+          : [];
+
+        // 1) Real photographs of whatever the story is actually about.
+        //    Skipped entirely for thematic stories, which have no
+        //    entities and are better served by stock anyway.
+        let entityImages = [];
+        if (entities.length) {
+          entityImages = await fetchWikimediaImages(entities, MAX_ENTITY_IMAGES);
+          console.log(
+            "[generate-video] entities:", entities.join(" | "),
+            "→", entityImages.length, "Commons images"
+          );
+        }
+        imageCredits = entityImages.map((i) => i.credit).filter(Boolean);
+
+        // 2) Stock fills the rest. Prefer the model's search phrases —
+        //    it understands that "ceasefire framework" should look like
+        //    a negotiation table, whereas the keyword map can only
+        //    recognise vocabulary it was written for. The map stays as a
+        //    fallback so a missing or unparseable response degrades to
+        //    the old behaviour instead of failing the render.
+        const fromModel = Array.isArray(job.image_queries) ? job.image_queries : [];
+        const usingModel = fromModel.length > 0;
+        const queries = usingModel ? fromModel : getStockQueries(headline, category);
         console.log(
-          "[generate-video] queries (" + (usingGemini ? "gemini" : "keyword map") + "):",
+          "[generate-video] stock queries (" + (usingModel ? "model" : "keyword map") + "):",
           queries.join(" | ")
         );
-        const imageUrls = await fetchPexelsImages(queries, IMAGE_COUNT, pexelsKey, category);
-        console.log("[generate-video] unique images fetched:", imageUrls.length);
+
+        let stockUrls = [];
+        try {
+          stockUrls = await fetchPexelsImages(
+            queries, IMAGE_COUNT - entityImages.length, pexelsKey, category
+          );
+        } catch (e) {
+          // A Pexels failure is survivable if Commons already gave us
+          // enough to work with — the check below decides.
+          console.warn("[generate-video] Pexels failed:", String(e).slice(0, 160));
+        }
+
+        const imageUrls = interleaveImages(
+          entityImages.map((i) => i.url), stockUrls, IMAGE_COUNT
+        );
+
+        if (imageUrls.length < MIN_IMAGE_COUNT) {
+          throw new Error(
+            "Only " + imageUrls.length + " usable images (" + entityImages.length +
+            " Commons, " + stockUrls.length + " Pexels) for: " + queries.join(" / ")
+          );
+        }
+
+        console.log(
+          "[generate-video] using", imageUrls.length, "images —",
+          entityImages.length, "entity,", imageUrls.length - entityImages.length, "stock"
+        );
+
         return Promise.all(imageUrls.map(async (url, i) => {
           const dest = path.join(workDir, "img" + i + ".jpg");
           await downloadToFile(url, dest);
@@ -566,7 +777,7 @@ export default async function handler(req, res) {
     await execFileAsync(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 50 });
 
     // ── Thumbnail ───────────────────────────────────────────────────
-    // Grabbed from the finished video rather than reusing a Pexels
+    // Grabbed from the finished video rather than reusing a source
     // image, for three reasons: it is guaranteed to match what actually
     // plays, it already carries the Ken Burns crop and burned-in
     // caption so the card previews the real thing, and it sidesteps any
@@ -619,9 +830,17 @@ export default async function handler(req, res) {
         status: "done",
         video_url: videoUrl,
         thumbnail_url: thumbnailUrl,
+        // Credit lines for any CC-BY / CC-BY-SA image used. Empty for
+        // stories illustrated entirely with stock or public-domain
+        // files. Paste these into the YouTube description.
+        image_credits: imageCredits.length ? imageCredits : null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
+
+    if (imageCredits.length) {
+      console.log("[generate-video] attribution required:", imageCredits.join(" // "));
+    }
 
     res.status(200).json({
       jobId,
@@ -630,6 +849,7 @@ export default async function handler(req, res) {
       durationSeconds: Number(realDuration.toFixed(2)),
       status: "done",
       imageCount: imagePaths.length,
+      imageCredits,
     });
   } catch (e) {
     console.error("[generate-video] render failed:", e);
