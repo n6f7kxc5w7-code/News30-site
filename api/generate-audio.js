@@ -66,7 +66,7 @@ const SCRIPT_PROMPT = `You write short vertical news videos.
 
 Return ONLY valid JSON. No markdown fences, no preamble, no trailing text.
 Exact shape:
-{"script":"...","imageQueries":["...","...","..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
+{"script":"...","imageQueries":["...","...","..."],"entities":["..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
 
 script: 65-75 words of spoken narration for a 30-second vertical news
 video, based on the headline below. Plain spoken sentences only — no
@@ -87,6 +87,21 @@ represent this story on Pexels. Rules:
   finished video does not show three near-identical shots.
 - No proper nouns. No dates. No numbers.
 
+entities: 0 to 3 named things this story is actually about, which a
+photo library like Wikimedia Commons would plausibly hold a picture
+of. Rules:
+- Companies, organisations, well-known people, countries, cities,
+  landmarks, spacecraft, sports clubs. Things with a Wikipedia page.
+- Use the full common name as it would be titled there: "SpaceX",
+  "Donald Trump", "European Central Bank", "Real Madrid".
+- Order them by how central they are to the story. The first entry
+  should be the main subject.
+- Return an EMPTY array if the story is thematic rather than about
+  named things — "inflation cools", "storms hit the coast",
+  "protests spread" have no entities. Do not force it. An empty array
+  is the correct answer more often than not.
+- Never include the outlet that reported it.
+
 quiz: exactly 3 multiple-choice questions testing whether someone
 actually took in the script you just wrote. Rules:
 - Every question must be answerable from the script alone. Do not ask
@@ -102,10 +117,14 @@ actually took in the script you just wrote. Rules:
 - Vary which index is correct across the three questions.
 
 Example for the headline "Israel and Hamas agree ceasefire framework":
-{"script":"...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
+{"script":"...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
 
 Example for the headline "Norway's sovereign wealth fund posts record returns":
-{"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}`;
+{"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"entities":["Government Pension Fund of Norway","Norway"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}
+
+Example for the headline "Core inflation cools to two point four percent" — a
+thematic story about no named thing, so entities is empty:
+{"script":"...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}`;
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
@@ -158,7 +177,20 @@ function parseScriptResponse(raw) {
         .slice(0, 3)
     : [];
 
-  return { script: parsed.script.trim(), imageQueries: queries, quiz };
+  /* Named subjects for the Wikimedia Commons lookup in generate-video.js.
+     Length-capped because an "entity" longer than about 60 characters is
+     the model returning a sentence, which would search Commons for
+     nonsense and waste a round trip. Deduped case-insensitively so
+     "SpaceX" and "spacex" don't claim two of the three slots. */
+  const entities = Array.isArray(parsed.entities)
+    ? parsed.entities
+        .filter((e) => typeof e === "string" && e.trim().length > 1 && e.trim().length <= 60)
+        .map((e) => e.trim())
+        .filter((e, i, arr) => arr.findIndex((x) => x.toLowerCase() === e.toLowerCase()) === i)
+        .slice(0, 3)
+    : [];
+
+  return { script: parsed.script.trim(), imageQueries: queries, entities, quiz };
 }
 
 async function generateScript(headline, category, apiKey) {
@@ -207,6 +239,12 @@ async function generateScript(headline, category, apiKey) {
   if (!parsed.quiz.length) {
     console.warn("[generate-audio] DeepSeek returned no usable quiz; front end will fall back to generated questions");
   }
+  // Not a warning — plenty of stories genuinely have no named subject,
+  // and forcing entities onto those is the failure mode to watch for.
+  console.log(
+    "[generate-audio] entities:",
+    parsed.entities.length ? parsed.entities.join(" | ") : "(none — thematic story)"
+  );
 
   return parsed;
 }
@@ -323,12 +361,14 @@ export default async function handler(req, res) {
     // 1) Script + image queries + quiz.
     let script = providedScript;
     let imageQueries = Array.isArray(providedQueries) ? providedQueries.slice(0, 3) : [];
+    let entities = [];
     let quiz = [];
 
     if (!script) {
       const generated = await generateScript(headline, category, deepseekKey);
       script = generated.script;
       if (!imageQueries.length) imageQueries = generated.imageQueries;
+      entities = generated.entities;
       quiz = generated.quiz;
     }
 
@@ -340,6 +380,7 @@ export default async function handler(req, res) {
       .update({
         script,
         image_queries: imageQueries.length ? imageQueries : null,
+        entities: entities.length ? entities : null,
         quiz: quiz.length ? quiz : null,
         status: "generating_audio",
         updated_at: new Date().toISOString(),
@@ -390,7 +431,7 @@ export default async function handler(req, res) {
       .update({ status: "audio_ready", audio_url: audioUrl, updated_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, quiz });
+    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, entities, quiz });
   } catch (e) {
     console.error("[generate-audio] failed:", e);
     await supabase
