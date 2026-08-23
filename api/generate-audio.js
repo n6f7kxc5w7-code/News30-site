@@ -87,19 +87,28 @@ represent this story on Pexels. Rules:
   finished video does not show three near-identical shots.
 - No proper nouns. No dates. No numbers.
 
-entities: 0 to 3 named things this story is actually about, which a
-photo library like Wikimedia Commons would plausibly hold a picture
-of. Rules:
-- Companies, organisations, well-known people, countries, cities,
-  landmarks, spacecraft, sports clubs. Things with a Wikipedia page.
-- Use the full common name as it would be titled there: "SpaceX",
-  "Donald Trump", "European Central Bank", "Real Madrid".
-- Order them by how central they are to the story. The first entry
-  should be the main subject.
-- Return an EMPTY array if the story is thematic rather than about
-  named things — "inflation cools", "storms hit the coast",
-  "protests spread" have no entities. Do not force it. An empty array
-  is the correct answer more often than not.
+entities: 1 to 3 named things this story is about, ordered most
+specific first. These are looked up in a photo archive, so they must
+be things a photographer would have photographed and someone would
+have catalogued. Rules:
+- People, companies, organisations, teams, countries, cities,
+  landmarks, stadiums, vehicles, spacecraft. Anything with a
+  Wikipedia page.
+- MOST SPECIFIC FIRST. If the story is about a player, name the
+  player before the team. If it names a stadium, the stadium before
+  the city. A photo of the actual subject beats a photo of the
+  category it belongs to.
+- Use the name as an encyclopedia would title it: "Jannik Sinner",
+  "SpaceX", "European Central Bank", "Silverstone Circuit".
+- Prefer the enduring thing over the event. "US Open" not "US Open
+  2026 second round"; "Formula One" not "Sunday's Grand Prix". The
+  archive has the venue and the competitor, never last night.
+- If the story names NO people, organisations or places at all —
+  "inflation cools", "storms hit the coast" — return an empty array.
+  That is rare. Most news is about someone or somewhere. Do not
+  return empty just because the story is ordinary; look again for
+  the country, the city, the institution or the industry body it
+  involves.
 - Never include the outlet that reported it.
 
 quiz: exactly 3 multiple-choice questions testing whether someone
@@ -122,9 +131,20 @@ Example for the headline "Israel and Hamas agree ceasefire framework":
 Example for the headline "Norway's sovereign wealth fund posts record returns":
 {"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"entities":["Government Pension Fund of Norway","Norway"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}
 
-Example for the headline "Core inflation cools to two point four percent" — a
-thematic story about no named thing, so entities is empty:
-{"script":"...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}`;
+Example for the headline "Core inflation cools to two point four percent" — no
+person, organisation or place is named anywhere, so entities is empty. This is
+the rare case:
+{"script":"...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}
+
+Example for the headline "Jannik Sinner withdraws from US Open with knee injury"
+— note the player comes before the tournament, because a photo of him is more
+use than a photo of a stadium:
+{"script":"...","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"Which tournament has he left?","opts":["Wimbledon","The US Open","The French Open","The Australian Open"],"correct":1},{"q":"What stage had been reached?","opts":["The final","The event was under way","Qualifying had not started","The trophy ceremony"],"correct":1}]}
+
+Example for the headline "Restaurants inside race zone say they are seeing less
+business" — no person is named, but the city and the event are, and both are
+photographable:
+{"script":"...","imageQueries":["empty restaurant tables","street barriers closed road","waiter empty dining room"],"entities":["Washington, D.C.","Street circuit"],"quiz":[{"q":"Who is reporting a downturn?","opts":["Restaurants inside the race zone","Hotels across the city","Ticket resellers","Local broadcasters"],"correct":0},{"q":"What do they say has happened to trade?","opts":["It has fallen","It has doubled","It is unchanged","It has moved online"],"correct":0},{"q":"What is the cause given?","opts":["The race zone","A transport strike","A health scare","A tax change"],"correct":0}]}`;
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
