@@ -270,12 +270,89 @@ function stripHtml(s) {
 }
 
 /**
+ * The canonical photograph of an entity, via Wikipedia's lead image.
+ *
+ * This is tried before a Commons search, and the difference matters.
+ * Commons full-text search returns whatever happens to be catalogued
+ * under a name, ranked by keyword relevance — searching "England
+ * cricket team" surfaced a 2015 Ashes photograph, correct but a decade
+ * stale. A Wikipedia article's lead image is chosen and maintained by
+ * editors to be the best current representation of the subject, which
+ * is exactly the judgement we want and cannot make ourselves.
+ *
+ * Two calls: Wikipedia for the filename, Commons for the licence and a
+ * sized copy. Wikipedia's own API returns no licence metadata, and
+ * using an image without knowing its licence is not something to do at
+ * scale.
+ */
+async function fetchWikipediaLeadImage(entity) {
+  const wpUrl =
+    "https://en.wikipedia.org/w/api.php" +
+    "?action=query&format=json&redirects=1" +   // redirects: "Trump" → "Donald Trump"
+    "&prop=pageimages&piprop=name" +
+    "&titles=" + encodeURIComponent(entity);
+
+  const wpRes = await fetch(wpUrl, { headers: { "User-Agent": WIKI_UA } });
+  if (!wpRes.ok) return null;
+
+  const wpData = await wpRes.json();
+  const pages = (wpData.query && wpData.query.pages) ? Object.values(wpData.query.pages) : [];
+  const page = pages[0];
+  // `missing` means no such article; no pageimage means the article
+  // exists but carries no illustration.
+  if (!page || page.missing !== undefined || !page.pageimage) return null;
+
+  const fileTitle = "File:" + page.pageimage;
+
+  const cUrl =
+    WIKI_ENDPOINT +
+    "?action=query&format=json" +
+    "&titles=" + encodeURIComponent(fileTitle) +
+    "&prop=imageinfo" +
+    "&iiprop=url|size|mime|extmetadata" +
+    "&iiurlwidth=1280";
+
+  const cRes = await fetch(cUrl, { headers: { "User-Agent": WIKI_UA } });
+  if (!cRes.ok) return null;
+
+  const cData = await cRes.json();
+  const cPages = (cData.query && cData.query.pages) ? Object.values(cData.query.pages) : [];
+  const info = cPages[0] && cPages[0].imageinfo && cPages[0].imageinfo[0];
+  if (!info) return null;
+  if (!/^image\/(jpeg|png)$/i.test(info.mime || "")) return null;
+
+  const src = info.thumburl || info.url;
+  if (!src) return null;
+  if ((info.thumbwidth || info.width || 0) < WIKI_MIN_WIDTH) return null;
+
+  const meta = info.extmetadata || {};
+  const licence = meta.LicenseShortName && meta.LicenseShortName.value;
+  if (!licenceIsUsable(licence)) return null;
+
+  const artist = stripHtml(meta.Artist && meta.Artist.value);
+  const needsCredit = !/^cc0|public domain|^pd[ -]/i.test(String(licence).trim());
+
+  return {
+    url: src,
+    source: "wikipedia",
+    credit: needsCredit
+      ? page.pageimage + (artist ? " by " + artist : "") + " — " + licence + ", via Wikimedia Commons"
+      : null,
+  };
+}
+
+/**
  * One good photograph per entity. Deliberately one, not several: three
  * different subjects beats three angles on the same logo, and the whole
  * point of this path is that the viewer recognises what they're being
  * told about.
  *
- * Returns [{ url, credit }] — credit is null for public-domain files.
+ * Wikipedia's lead image first, Commons search only if that finds
+ * nothing — the search is noisier, so it's the backstop rather than the
+ * default.
+ *
+ * Returns [{ url, credit, source }] — credit is null for public-domain
+ * files.
  */
 async function fetchWikimediaImages(entities, maxImages) {
   const out = [];
@@ -284,6 +361,20 @@ async function fetchWikimediaImages(entities, maxImages) {
   for (const entity of entities) {
     if (out.length >= maxImages) break;
 
+    // ── 1. The curated option ──────────────────────────────────────
+    try {
+      const lead = await fetchWikipediaLeadImage(entity);
+      if (lead && !seenUrls.has(lead.url)) {
+        seenUrls.add(lead.url);
+        out.push(lead);
+        console.log("[generate-video]", entity, "→ Wikipedia lead image");
+        continue;
+      }
+    } catch (e) {
+      console.warn("[generate-video] Wikipedia lookup errored for", entity, String(e).slice(0, 120));
+    }
+
+    // ── 2. The backstop ────────────────────────────────────────────
     try {
       // `filetype:bitmap` keeps out SVG logos, PDFs and audio files,
       // which Commons search happily returns otherwise and FFmpeg
@@ -332,14 +423,16 @@ async function fetchWikimediaImages(entities, maxImages) {
         seenUrls.add(src);
         out.push({
           url: src,
+          source: "commons",
           credit: needsCredit
             ? title + (artist ? " by " + artist : "") + " — " + licence + ", via Wikimedia Commons"
             : null,
         });
+        console.log("[generate-video]", entity, "→ Commons search");
         break; // one per entity
       }
     } catch (e) {
-      // Never fatal. A failed Commons lookup just means this story is
+      // Never fatal. A failed lookup just means this story is
       // illustrated the old way.
       console.warn("[generate-video] Commons lookup errored for", entity, String(e).slice(0, 120));
     }
