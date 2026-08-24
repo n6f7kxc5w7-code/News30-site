@@ -35,12 +35,17 @@
 // this effectively free: one call produces narration, visuals and
 // comprehension.
 //
-// Setup in Vercel → Settings → Environment Variables:
-//   FISH_API_KEY, FISH_VOICE_ID, SUPABASE_SERVICE_ROLE_KEY,
-//   DEEPSEEK_API_KEY
-// Reuses VITE_SUPABASE_URL (just the project URL, not a secret).
-//
-// Requires: alter table video_jobs add column if not exists quiz jsonb;
+// ─── WHY THE FIRST SENTENCE HAS ITS OWN RULE BLOCK ───────────────────
+// The first three published Shorts all lost ~43% of viewers on the
+// swipe, within a point of each other, across wildly different
+// distribution (604 views vs 37). Retention that consistent across that
+// much variance is a FORMAT problem, not a story-quality one — and on
+// Shorts the format decision that matters happens in the first two
+// seconds. Average view duration was fine (18-24s of a ~30s video), so
+// the body holds; it is the opening that leaks. Hence the hook rules
+// below carry as much prompt weight as the whole rest of the script
+// spec. Change one thing at a time and compare batch averages, not
+// individual videos — at 37 views a percentage is noise.
 
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
@@ -51,6 +56,12 @@ const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
 // options each on top of the script, and a truncated response fails the
 // JSON parse outright rather than degrading gracefully.
 const MAX_TOKENS = 1400;
+
+// Bumped when the prompt changes in a way that could move retention, so
+// published_stories rows can be grouped by prompt version when comparing
+// batches. Without this, two weeks of videos are indistinguishable and
+// the A/B is unrecoverable.
+const SCRIPT_PROMPT_VERSION = 2;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -71,11 +82,32 @@ Exact shape:
 script: 65-75 words of spoken narration for a 30-second vertical news
 video, based on the headline below. Plain spoken sentences only — no
 headings, no bullet points, no stage directions, no speaker labels.
-Open with the news itself. Write numbers as words where it reads more
-naturally aloud ("four point two five percent", not "4.25%"), since
-this text is sent straight to a text-to-speech engine. Only narrate
-what is stated in the headline — do not invent specific facts, figures,
-or outcomes that are not given to you.
+Write numbers as words where it reads more naturally aloud ("four point
+two five percent", not "4.25%"), since this text is sent straight to a
+text-to-speech engine. Only narrate what is stated in the headline — do
+not invent specific facts, figures, or outcomes that are not given to
+you.
+
+THE FIRST SENTENCE IS THE HOOK. It decides whether anyone watches the
+rest, so treat it as the hardest sentence to write. Rules:
+- Maximum 8 words. It must finish inside the first two seconds.
+- Lead with the most consequential thing in the headline — the figure,
+  the name, the reversal, the stake. Not the context around it.
+- Never open with: "In a major development", "Today", "This week",
+  "Sources say", "It has been announced", "Reports suggest", or the
+  name of any outlet.
+- No questions. No "Here's what you need to know". No second-person
+  address.
+- State it flat. The fact carries it. Do not add words like "shocking",
+  "stunning", "massive", or "unprecedented" unless the headline itself
+  says so.
+- It must be true to the headline. A punchier sentence that overstates
+  what the headline supports is wrong, not better.
+
+GOOD: "Canada's prime minister has been suspended."
+GOOD: "US debt has passed forty trillion dollars."
+BAD:  "In a stunning turn of events, the Canadian government has
+       announced a major development regarding its leadership."
 
 imageQueries: exactly 3 stock-photo search phrases that visually
 represent this story on Pexels. Rules:
@@ -125,26 +157,28 @@ actually took in the script you just wrote. Rules:
 - "correct" is the 0-based index of the right option.
 - Vary which index is correct across the three questions.
 
-Example for the headline "Israel and Hamas agree ceasefire framework":
-{"script":"...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
+Example for the headline "Israel and Hamas agree ceasefire framework" —
+note the script opens on the agreement itself, in six words:
+{"script":"Israel and Hamas have agreed a ceasefire framework. ...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
 
-Example for the headline "Norway's sovereign wealth fund posts record returns":
-{"script":"...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"entities":["Government Pension Fund of Norway","Norway"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}
+Example for the headline "Norway's sovereign wealth fund posts record returns" —
+the record is the hook, so it goes first and the fund's name follows:
+{"script":"Norway's wealth fund has posted record returns. ...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"entities":["Government Pension Fund of Norway","Norway"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}
 
 Example for the headline "Core inflation cools to two point four percent" — no
 person, organisation or place is named anywhere, so entities is empty. This is
-the rare case:
-{"script":"...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}
+the rare case. The figure is the hook:
+{"script":"Core inflation has cooled to two point four percent. ...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}
 
 Example for the headline "Jannik Sinner withdraws from US Open with knee injury"
-— note the player comes before the tournament, because a photo of him is more
-use than a photo of a stadium:
-{"script":"...","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"Which tournament has he left?","opts":["Wimbledon","The US Open","The French Open","The Australian Open"],"correct":1},{"q":"What stage had been reached?","opts":["The final","The event was under way","Qualifying had not started","The trophy ceremony"],"correct":1}]}
+— note the player comes before the tournament in entities, because a photo of
+him is more use than a photo of a stadium, and the withdrawal leads the script:
+{"script":"Jannik Sinner has withdrawn from the US Open. ...","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"Which tournament has he left?","opts":["Wimbledon","The US Open","The French Open","The Australian Open"],"correct":1},{"q":"What stage had been reached?","opts":["The final","The event was under way","Qualifying had not started","The trophy ceremony"],"correct":1}]}
 
 Example for the headline "Restaurants inside race zone say they are seeing less
 business" — no person is named, but the city and the event are, and both are
 photographable:
-{"script":"...","imageQueries":["empty restaurant tables","street barriers closed road","waiter empty dining room"],"entities":["Washington, D.C.","Street circuit"],"quiz":[{"q":"Who is reporting a downturn?","opts":["Restaurants inside the race zone","Hotels across the city","Ticket resellers","Local broadcasters"],"correct":0},{"q":"What do they say has happened to trade?","opts":["It has fallen","It has doubled","It is unchanged","It has moved online"],"correct":0},{"q":"What is the cause given?","opts":["The race zone","A transport strike","A health scare","A tax change"],"correct":0}]}`;
+{"script":"Restaurants inside the race zone are losing trade. ...","imageQueries":["empty restaurant tables","street barriers closed road","waiter empty dining room"],"entities":["Washington, D.C.","Street circuit"],"quiz":[{"q":"Who is reporting a downturn?","opts":["Restaurants inside the race zone","Hotels across the city","Ticket resellers","Local broadcasters"],"correct":0},{"q":"What do they say has happened to trade?","opts":["It has fallen","It has doubled","It is unchanged","It has moved online"],"correct":0},{"q":"What is the cause given?","opts":["The race zone","A transport strike","A health scare","A tax change"],"correct":0}]}`;
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
@@ -213,6 +247,35 @@ function parseScriptResponse(raw) {
   return { script: parsed.script.trim(), imageQueries: queries, entities, quiz };
 }
 
+/* Cheap sanity check on the opening line. Not a hard failure — a script
+   that opens weakly is still publishable, and rejecting it would mean
+   paying for a second DeepSeek call to fix a cosmetic problem. But it
+   needs to show up in the logs, because the whole point of the prompt
+   change is that the first two seconds are where retention is lost. If
+   these warnings are frequent, the prompt is not landing and the fix is
+   the prompt, not the parser. */
+const WEAK_OPENERS = [
+  /^in a (major|stunning|dramatic|significant)/i,
+  /^(today|this week|this morning|recently)\b/i,
+  /^(sources say|reports suggest|it has been announced)/i,
+  /^here'?s (what|why|how)/i,
+  /^did you know/i,
+];
+
+function checkHook(script) {
+  const firstSentence = (script.split(/(?<=[.!?])\s/)[0] || "").trim();
+  const words = firstSentence.split(/\s+/).filter(Boolean).length;
+  const weak = WEAK_OPENERS.some((re) => re.test(firstSentence));
+
+  if (weak) {
+    console.warn("[generate-audio] hook uses a banned opener:", firstSentence);
+  } else if (words > 10) {
+    console.warn("[generate-audio] hook is long (" + words + " words):", firstSentence);
+  } else {
+    console.log("[generate-audio] hook (" + words + "w):", firstSentence);
+  }
+}
+
 async function generateScript(headline, category, apiKey) {
   const prompt =
     SCRIPT_PROMPT +
@@ -265,6 +328,8 @@ async function generateScript(headline, category, apiKey) {
     "[generate-audio] entities:",
     parsed.entities.length ? parsed.entities.join(" | ") : "(none — thematic story)"
   );
+
+  checkHook(parsed.script);
 
   return parsed;
 }
@@ -383,6 +448,9 @@ export default async function handler(req, res) {
     let imageQueries = Array.isArray(providedQueries) ? providedQueries.slice(0, 3) : [];
     let entities = [];
     let quiz = [];
+    // Only meaningful when we generated the script ourselves — a supplied
+    // script came from the test harness and belongs to no prompt version.
+    let promptVersion = null;
 
     if (!script) {
       const generated = await generateScript(headline, category, deepseekKey);
@@ -390,6 +458,7 @@ export default async function handler(req, res) {
       if (!imageQueries.length) imageQueries = generated.imageQueries;
       entities = generated.entities;
       quiz = generated.quiz;
+      promptVersion = SCRIPT_PROMPT_VERSION;
     }
 
     // Persist all three before TTS — if narration fails, the script,
@@ -402,6 +471,7 @@ export default async function handler(req, res) {
         image_queries: imageQueries.length ? imageQueries : null,
         entities: entities.length ? entities : null,
         quiz: quiz.length ? quiz : null,
+        script_prompt_version: promptVersion,
         status: "generating_audio",
         updated_at: new Date().toISOString(),
       })
@@ -451,7 +521,7 @@ export default async function handler(req, res) {
       .update({ status: "audio_ready", audio_url: audioUrl, updated_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, entities, quiz });
+    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, entities, quiz, scriptPromptVersion: promptVersion });
   } catch (e) {
     console.error("[generate-audio] failed:", e);
     await supabase
