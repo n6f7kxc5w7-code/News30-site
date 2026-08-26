@@ -74,32 +74,34 @@ for (const [name, value] of Object.entries({
   }
 }
 
-/* ─── TEMPORARY DIAGNOSTIC — DELETE ONCE THE URL IS FIXED ────────────
-   "Invalid path specified in request URL" means SUPABASE_URL is
-   malformed rather than merely wrong: the client builds every request
-   path off it, so a trailing slash, a stray newline, or the anon key
-   pasted in by mistake all produce that same unhelpful message.
+/* ─── TEMPORARY DIAGNOSTIC — DELETE ONCE UPLOADS WORK ────────────────
+   Hoppscotch successfully exchanged a code for a refresh token using
+   these exact credentials, so the values themselves are known-good.
+   That narrows the 401 invalid_client to what is stored in GitHub
+   secrets: a truncated paste, a stray newline, or one of the three
+   pasted into the wrong slot.
 
-   None of this leaks anything. The project URL is public — it appears
-   in every request the website makes from the browser. The KEY is
-   never printed, only whether it looks like the right SHAPE, because
-   pasting the URL and key into each other's slots is an easy mistake
-   and produces exactly this error. */
-console.log("[diag] SUPABASE_URL length:", SUPABASE_URL.length);
-console.log("[diag] starts with https:// :", SUPABASE_URL.startsWith("https://"));
-console.log("[diag] ends with .supabase.co :", SUPABASE_URL.endsWith(".supabase.co"));
-// JSON.stringify is what makes an invisible \n or a trailing space
-// visible — without it the log looks completely normal.
-console.log("[diag] last 30 chars:", JSON.stringify(SUPABASE_URL.slice(-30)));
-console.log("[diag] has whitespace anywhere:", /\s/.test(SUPABASE_URL));
-console.log("[diag] service key length:", SUPABASE_SERVICE_ROLE_KEY.length);
+   Nothing sensitive is printed — only lengths, prefixes, and shape
+   checks. Expected lengths for reference:
+     client_id      72   ends .apps.googleusercontent.com
+     client_secret  35   starts GOCSPX-
+     refresh_token 103   starts 1//
+   A length that is short means the paste was truncated, which is
+   exactly what happens when copying out of a wrapped terminal. */
+console.log("[diag] client_id length:", YOUTUBE_CLIENT_ID.length, "(expect 72)");
+console.log("[diag] client_id ends .apps.googleusercontent.com:", YOUTUBE_CLIENT_ID.endsWith(".apps.googleusercontent.com"));
+console.log("[diag] client_id first 20:", YOUTUBE_CLIENT_ID.slice(0, 20));
+console.log("[diag] secret length:", YOUTUBE_CLIENT_SECRET.length, "(expect 35)");
+console.log("[diag] secret starts GOCSPX-:", YOUTUBE_CLIENT_SECRET.startsWith("GOCSPX-"));
+console.log("[diag] token length:", YOUTUBE_REFRESH_TOKEN.length, "(expect ~103)");
+console.log("[diag] token starts 1//:", YOUTUBE_REFRESH_TOKEN.startsWith("1//"));
+// Whitespace is invisible in the GitHub secrets UI and is the single
+// most common cause of a credential that "looks right" but fails.
 console.log(
-  "[diag] service key shape:",
-  SUPABASE_SERVICE_ROLE_KEY.startsWith("eyJ") ? "legacy JWT (expected)"
-    : SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_secret_") ? "new-style secret key"
-    : SUPABASE_SERVICE_ROLE_KEY.startsWith("https://") ? "⚠️ this is a URL, not a key — secrets are swapped"
-    : "⚠️ unrecognised"
+  "[diag] whitespace in [id, secret, token]:",
+  [YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN].map((v) => /\s/.test(v))
 );
+console.log("[diag] SUPABASE_URL length:", SUPABASE_URL.length, "(expect 40)");
 /* ─── END DIAGNOSTIC ─────────────────────────────────────────────── */
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
