@@ -74,6 +74,34 @@ for (const [name, value] of Object.entries({
   }
 }
 
+/* ─── TEMPORARY DIAGNOSTIC — DELETE ONCE THE URL IS FIXED ────────────
+   "Invalid path specified in request URL" means SUPABASE_URL is
+   malformed rather than merely wrong: the client builds every request
+   path off it, so a trailing slash, a stray newline, or the anon key
+   pasted in by mistake all produce that same unhelpful message.
+
+   None of this leaks anything. The project URL is public — it appears
+   in every request the website makes from the browser. The KEY is
+   never printed, only whether it looks like the right SHAPE, because
+   pasting the URL and key into each other's slots is an easy mistake
+   and produces exactly this error. */
+console.log("[diag] SUPABASE_URL length:", SUPABASE_URL.length);
+console.log("[diag] starts with https:// :", SUPABASE_URL.startsWith("https://"));
+console.log("[diag] ends with .supabase.co :", SUPABASE_URL.endsWith(".supabase.co"));
+// JSON.stringify is what makes an invisible \n or a trailing space
+// visible — without it the log looks completely normal.
+console.log("[diag] last 30 chars:", JSON.stringify(SUPABASE_URL.slice(-30)));
+console.log("[diag] has whitespace anywhere:", /\s/.test(SUPABASE_URL));
+console.log("[diag] service key length:", SUPABASE_SERVICE_ROLE_KEY.length);
+console.log(
+  "[diag] service key shape:",
+  SUPABASE_SERVICE_ROLE_KEY.startsWith("eyJ") ? "legacy JWT (expected)"
+    : SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_secret_") ? "new-style secret key"
+    : SUPABASE_SERVICE_ROLE_KEY.startsWith("https://") ? "⚠️ this is a URL, not a key — secrets are swapped"
+    : "⚠️ unrecognised"
+);
+/* ─── END DIAGNOSTIC ─────────────────────────────────────────────── */
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* Refresh tokens are long-lived; access tokens last an hour. Exchanging
