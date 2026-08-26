@@ -8,6 +8,9 @@ dist
 .env
 .env.*
 *.local
+client_secret*.json
+credentials.json
+token.json
 
 # tooling
 .vercel
