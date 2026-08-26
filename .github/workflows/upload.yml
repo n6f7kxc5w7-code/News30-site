@@ -1,0 +1,55 @@
+name: Upload to YouTube
+
+# Runs a few hours after the ingest/process crons, so renders have had
+# time to finish and there is something in `ready` to pick up.
+#
+# Times are UTC. Norway is UTC+2 in summer, UTC+1 in winter — GitHub
+# does not adjust for that, so these shift by an hour twice a year.
+# That is fine here: nothing is published by this workflow, it only
+# stages private drafts for review.
+#
+# Note that scheduled workflows on GitHub are best-effort and can be
+# delayed by several minutes under load. Also fine — the queue is not
+# time-critical, and uploads are idempotent.
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # ~09:00 Oslo
+    - cron: "0 15 * * *"  # ~17:00 Oslo
+  # Lets you trigger a run by hand from the Actions tab, which is what
+  # you want while testing rather than waiting for a cron.
+  workflow_dispatch:
+
+# Only one upload run at a time. Without this, a manual trigger during a
+# scheduled run could have two jobs reading the same `ready` rows before
+# either has written youtube_id back — the one guard the idempotency
+# check cannot provide on its own.
+concurrency:
+  group: youtube-upload
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    # Uploads are slow but not six-hours slow. If it hangs, something is
+    # wrong and it should fail rather than sit there.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install @supabase/supabase-js --no-save
+
+      - name: Upload pending videos
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/upload.js
