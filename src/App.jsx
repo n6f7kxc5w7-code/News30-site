@@ -3172,6 +3172,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 }
 
 /* ═══════════════════ 13 · APP ROOT — state + wiring ════════════════ */
+
 /* iOS Safari doesn't resize the layout viewport when the keyboard opens,
    so a position:fixed panel stays put and its input ends up behind the
    keys. visualViewport reports the real visible area — the difference is
@@ -3213,11 +3214,8 @@ function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
-  const canFull = vw >= 1100;
 
-     useKeyboardInset();
-
-  const [view, setView] = React.useState("home");
+  useKeyboardInset();
 
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
@@ -3297,7 +3295,7 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [toast]);
-   
+
   /* Demo of "breaking news" — a sample story posts 30s after load,
      lands top of feed + fires a notification + toast. Skipped once
      real NewsAPI headlines are live. 🔌 Real build: websocket /
@@ -3319,7 +3317,7 @@ function App() {
   userRef.current = user;
   React.useEffect(() => {
     if (!user || !db.enabled()) return;
-        const t = setTimeout(() => db.saveUserData(user, userData), 800);
+    const t = setTimeout(() => db.saveUserData(user, userData), 800);
     return () => clearTimeout(t);
   }, [userData, user]);
 
@@ -3459,9 +3457,8 @@ function App() {
       <Header
         onMenu={onMenuBtn}
         onBrand={() => goNav("home")}
-            mobile={mobile}
-                 onOpenAsk={() => goNav("askai")}
-
+        mobile={mobile}
+        onOpenAsk={() => goNav("askai")}
         query={query} setQuery={setQuery} onAsk={headerAsk}
         notifCount={unread}
         onBell={() => setMenu(menu === "bell" ? null : "bell")}
