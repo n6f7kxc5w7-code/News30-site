@@ -74,36 +74,6 @@ for (const [name, value] of Object.entries({
   }
 }
 
-/* ─── TEMPORARY DIAGNOSTIC — DELETE ONCE UPLOADS WORK ────────────────
-   Hoppscotch successfully exchanged a code for a refresh token using
-   these exact credentials, so the values themselves are known-good.
-   That narrows the 401 invalid_client to what is stored in GitHub
-   secrets: a truncated paste, a stray newline, or one of the three
-   pasted into the wrong slot.
-
-   Nothing sensitive is printed — only lengths, prefixes, and shape
-   checks. Expected lengths for reference:
-     client_id      72   ends .apps.googleusercontent.com
-     client_secret  35   starts GOCSPX-
-     refresh_token 103   starts 1//
-   A length that is short means the paste was truncated, which is
-   exactly what happens when copying out of a wrapped terminal. */
-console.log("[diag] client_id length:", YOUTUBE_CLIENT_ID.length, "(expect 72)");
-console.log("[diag] client_id ends .apps.googleusercontent.com:", YOUTUBE_CLIENT_ID.endsWith(".apps.googleusercontent.com"));
-console.log("[diag] client_id first 20:", YOUTUBE_CLIENT_ID.slice(0, 20));
-console.log("[diag] secret length:", YOUTUBE_CLIENT_SECRET.length, "(expect 35)");
-console.log("[diag] secret starts GOCSPX-:", YOUTUBE_CLIENT_SECRET.startsWith("GOCSPX-"));
-console.log("[diag] token length:", YOUTUBE_REFRESH_TOKEN.length, "(expect ~103)");
-console.log("[diag] token starts 1//:", YOUTUBE_REFRESH_TOKEN.startsWith("1//"));
-// Whitespace is invisible in the GitHub secrets UI and is the single
-// most common cause of a credential that "looks right" but fails.
-console.log(
-  "[diag] whitespace in [id, secret, token]:",
-  [YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN].map((v) => /\s/.test(v))
-);
-console.log("[diag] SUPABASE_URL length:", SUPABASE_URL.length, "(expect 40)");
-/* ─── END DIAGNOSTIC ─────────────────────────────────────────────── */
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* Refresh tokens are long-lived; access tokens last an hour. Exchanging
