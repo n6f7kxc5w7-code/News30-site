@@ -37,6 +37,8 @@
 // Security: this endpoint spends money, so it requires CRON_SECRET.
 // Vercel Cron sends it automatically as a bearer token; anyone else
 // calling the URL gets a 401.
+//
+// Requires: alter table published_stories add column if not exists description text;
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -48,6 +50,13 @@ const CATEGORY_MAP = {
 
 const STORIES_PER_CATEGORY = 2;
 const HEADLINES_TO_CONSIDER = 40; // pool per category before ranking
+
+/* NewsAPI's description is one or two sentences of real detail. It is
+   capped here rather than at read time because there is no point
+   storing a truncated paragraph plus the "[+1423 chars]" tail NewsAPI
+   appends — that tail is boilerplate the model would have to be told
+   to ignore. 600 characters comfortably holds a full summary. */
+const MAX_DESCRIPTION = 600;
 
 // Outlets that break stories rather than repackage them. Anything
 // unlisted scores 1 — unknown, not penalised.
@@ -108,6 +117,28 @@ function sourceTier(name) {
 
 function isSoftNews(headline) {
   return SOFT_NEWS_PATTERNS.some((re) => re.test(headline || ""));
+}
+
+/* NewsAPI truncates long descriptions and marks the cut with a
+   "[+1423 chars]" suffix. Left in, that string reaches DeepSeek as if
+   it were part of the story. Strip it, along with the usual HTML
+   entities that survive the feed. */
+function cleanDescription(raw) {
+  if (typeof raw !== "string") return null;
+  const text = raw
+    .replace(/\[\+\d+\s*chars?\]\s*$/i, "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Anything this short is a stub ("Read more", a byline, an ellipsis)
+  // and is worse than nothing: it would be presented to the model as
+  // source material and produce a script built on a fragment.
+  if (text.length < 30) return null;
+  return text.slice(0, MAX_DESCRIPTION);
 }
 
 /**
@@ -181,17 +212,30 @@ function rankStories(articles, limit) {
     // Headlines under ~5 words are usually teasers with no substance.
     const brevityPenalty = tokenize(article.title).size < 4 ? -15 : 0;
 
+    /* A story with no usable summary can only ever produce a
+       headline-only script, and those measured 18 to 48 words against a
+       65-75 target. That is not a reason to reject the story — a real
+       lead with a thin description still beats a padded minor one — but
+       it is a reason to prefer the version of the same event that came
+       with detail. The lead article is chosen by source tier, so this
+       nudges rather than overrides. */
+    const cluster_desc = cleanDescription(article.description);
+    const detailBonus = cluster_desc ? 8 : 0;
+
     const significance =
-      corroborationScore + tierScore + recencyScore + positionScore + softPenalty + brevityPenalty;
+      corroborationScore + tierScore + recencyScore + positionScore +
+      softPenalty + brevityPenalty + detailBonus;
 
     return {
       article,
+      description: cluster_desc,
       significance,
       corroboration,
       rank_reason:
         corroboration + " outlets" +
         ", tier " + bestTier +
         ", " + ageHours.toFixed(1) + "h old" +
+        (cluster_desc ? ", has summary" : ", HEADLINE ONLY") +
         (softPenalty ? ", soft-news penalty" : "") +
         (brevityPenalty ? ", thin headline" : ""),
     };
@@ -275,11 +319,26 @@ export default async function handler(req, res) {
         top.map((t) => t.significance + " — " + t.article.title.slice(0, 60)).join(" | ")
       );
 
+      /* How many of today's picks carry real source material. If this
+         is regularly 0, the scripts will stay short no matter what the
+         prompt says, and the fix is a different news source rather than
+         more prompt engineering. */
+      const withSummary = top.filter((t) => t.description).length;
+      console.log("[ingest]", category, "with summary:", withSummary + "/" + top.length);
+
       // Slot 1 is the lead story for the category.
       const rows = top.map((t, i) => ({
         article_url: t.article.url,
         category,
         headline: (t.article.title || "").replace(/\s+[-|–]\s+[^-|–]+$/, "").trim(),
+        /* NewsAPI's own one-or-two-sentence summary. Previously thrown
+           away, which left DeepSeek writing 65-75 word scripts from a
+           headline alone — it cannot, and the prompt (correctly) forbids
+           inventing detail, so it stopped early instead. Measured
+           scripts ran 18 to 57 words, producing 13-21 second videos.
+           This column is what makes a full-length script possible
+           without fabricating anything. */
+        description: t.description,
         source: (t.article.source && t.article.source.name) || "Newswire",
         article_published: t.article.publishedAt || new Date().toISOString(),
         significance: t.significance,
@@ -302,7 +361,11 @@ export default async function handler(req, res) {
         .select("id");
 
       if (error) throw error;
-      summary[category] = { considered: rows.length, inserted: (written || []).length };
+      summary[category] = {
+        considered: rows.length,
+        inserted: (written || []).length,
+        with_summary: withSummary,
+      };
     }
 
     // Kick the worker. This is still fire-and-forget in spirit — we do
