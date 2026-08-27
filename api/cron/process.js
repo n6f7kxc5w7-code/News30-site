@@ -21,6 +21,7 @@
 // Security: requires CRON_SECRET, same as ingest.
 //
 // Requires: alter table published_stories add column if not exists quiz jsonb;
+//           alter table published_stories add column if not exists description text;
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -111,6 +112,14 @@ export default async function handler(req, res) {
       // Passing headline and category (not a script) is what triggers
       // the DeepSeek path, which returns the script, the stock-photo
       // search phrases AND the quiz questions in one call.
+      //
+      // `description` is NewsAPI's own summary of the article, stored by
+      // ingest.js. It is the difference between a full-length script and
+      // a stub: without it the model has only the headline, and since
+      // the prompt forbids inventing detail it simply stops early —
+      // measured at 18 to 57 words against a 65-75 target. Rows queued
+      // before the column existed send null and fall back to the old
+      // headline-only behaviour rather than failing.
       const audioRes = await fetch(base + "/api/generate-audio", {
         method: "POST",
         headers: {
@@ -120,6 +129,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           storyId: story.id,
           headline: story.headline,
+          description: story.description || null,
           category: story.category,
         }),
       });
@@ -154,11 +164,18 @@ export default async function handler(req, res) {
       // The quiz is copied onto the story row rather than left on the
       // job row, because the front end only ever reads published_stories
       // — a join would mean a second query on every feed load.
+      //
+      // script_prompt_version comes back from generate-audio and is
+      // stored here too, so a batch of videos can be grouped by which
+      // prompt wrote them when comparing retention later. Without it,
+      // two weeks of output is indistinguishable and the comparison is
+      // unrecoverable.
       await supabase
         .from("published_stories")
         .update({
           status: "ready",
           script: audioData.script,
+          script_prompt_version: audioData.scriptPromptVersion || null,
           image_queries: audioData.imageQueries || null,
           quiz: (audioData.quiz && audioData.quiz.length) ? audioData.quiz : null,
           audio_url: audioData.audioUrl,
@@ -170,7 +187,16 @@ export default async function handler(req, res) {
         })
         .eq("id", story.id);
 
-      console.log("[process] published:", story.headline.slice(0, 70));
+      /* Word count and resulting duration, logged together. This is the
+         pair to watch: if scripts are long but videos are still short,
+         the narration is being cut off in the render and the prompt is
+         not the problem. */
+      const words = (audioData.script || "").split(/\s+/).filter(Boolean).length;
+      console.log(
+        "[process] published:", story.headline.slice(0, 50),
+        "—", words + "w,", (videoData.durationSeconds || "?") + "s,",
+        story.description ? "had summary" : "HEADLINE ONLY"
+      );
     } catch (e) {
       const message = String(e.message || e).slice(0, 500);
       console.error("[process] story failed:", story.id, message);
