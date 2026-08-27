@@ -46,6 +46,22 @@
 // below carry as much prompt weight as the whole rest of the script
 // spec. Change one thing at a time and compare batch averages, not
 // individual videos — at 37 views a percentage is noise.
+//
+// ─── WHY THE SUMMARY GETS PASSED IN ──────────────────────────────────
+// The word count was wildly inconsistent — measured scripts ran 18, 32,
+// 48 and 57 words against a 65-75 instruction, producing 13-21 second
+// videos instead of 30. That was never the model ignoring the count.
+// It was only ever given the HEADLINE, and the prompt (correctly)
+// forbids inventing facts, so on a thin story there was genuinely
+// nothing left to write. The 18-word one was a story with almost no
+// substance in its title.
+//
+// The fix is more source material, not a louder instruction: NewsAPI
+// already returns a one-or-two-sentence `description` alongside every
+// title, which ingest.js now stores and process.js now forwards. With
+// real detail to work from, a full-length script becomes possible
+// without fabricating anything — and the scripts get better, not just
+// longer. Length is a symptom; substance was the problem.
 
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
@@ -61,7 +77,9 @@ const MAX_TOKENS = 1400;
 // published_stories rows can be grouped by prompt version when comparing
 // batches. Without this, two weeks of videos are indistinguishable and
 // the A/B is unrecoverable.
-const SCRIPT_PROMPT_VERSION = 2;
+//   v2 — hook rules added
+//   v3 — NewsAPI description passed in as source material
+const SCRIPT_PROMPT_VERSION = 3;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -79,19 +97,34 @@ Return ONLY valid JSON. No markdown fences, no preamble, no trailing text.
 Exact shape:
 {"script":"...","imageQueries":["...","...","..."],"entities":["..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
 
+You are given a Headline and, usually, a Summary. The Summary is the
+outlet's own one-or-two-sentence account of the story and it is the
+main thing you write from — mine it for the specifics that make a
+script worth watching. The Headline alone is rarely enough.
+
 script: 65-75 words of spoken narration for a 30-second vertical news
-video, based on the headline below. Plain spoken sentences only — no
-headings, no bullet points, no stage directions, no speaker labels.
-Write numbers as words where it reads more naturally aloud ("four point
-two five percent", not "4.25%"), since this text is sent straight to a
-text-to-speech engine. Only narrate what is stated in the headline — do
-not invent specific facts, figures, or outcomes that are not given to
-you.
+video. Plain spoken sentences only — no headings, no bullet points, no
+stage directions, no speaker labels. Write numbers as words where it
+reads more naturally aloud ("four point two five percent", not
+"4.25%"), since this text is sent straight to a text-to-speech engine.
+
+USING THE SOURCE MATERIAL:
+- Take every concrete detail the Headline and Summary give you: the
+  figures, the names, the places, the dates, the sequence of events,
+  who said what.
+- Only narrate what is stated in the Headline or Summary. Do NOT invent
+  specific facts, figures, quotes, or outcomes you were not given.
+- Do not pad. If the source material genuinely runs out before 65
+  words, write a shorter script and stop. A tight 45-word script is
+  better than 70 words of restatement and filler — and far better than
+  70 words containing something you made up.
+- Never restate the same fact twice in different words. If you find
+  yourself doing that, you have run out of material: stop.
 
 THE FIRST SENTENCE IS THE HOOK. It decides whether anyone watches the
 rest, so treat it as the hardest sentence to write. Rules:
 - Maximum 8 words. It must finish inside the first two seconds.
-- Lead with the most consequential thing in the headline — the figure,
+- Lead with the most consequential thing in the story — the figure,
   the name, the reversal, the stake. Not the context around it.
 - Never open with: "In a major development", "Today", "This week",
   "Sources say", "It has been announced", "Reports suggest", or the
@@ -99,10 +132,9 @@ rest, so treat it as the hardest sentence to write. Rules:
 - No questions. No "Here's what you need to know". No second-person
   address.
 - State it flat. The fact carries it. Do not add words like "shocking",
-  "stunning", "massive", or "unprecedented" unless the headline itself
-  says so.
-- It must be true to the headline. A punchier sentence that overstates
-  what the headline supports is wrong, not better.
+  "stunning", "massive", or "unprecedented" unless the source says so.
+- It must be true to the source. A punchier sentence that overstates
+  what you were given is wrong, not better.
 
 GOOD: "Canada's prime minister has been suspended."
 GOOD: "US debt has passed forty trillion dollars."
@@ -135,6 +167,8 @@ have catalogued. Rules:
 - Prefer the enduring thing over the event. "US Open" not "US Open
   2026 second round"; "Formula One" not "Sunday's Grand Prix". The
   archive has the venue and the competitor, never last night.
+- The Summary often names people and places the Headline leaves out —
+  check it before returning an empty array.
 - If the story names NO people, organisations or places at all —
   "inflation cools", "storms hit the coast" — return an empty array.
   That is rare. Most news is about someone or somewhere. Do not
@@ -157,28 +191,33 @@ actually took in the script you just wrote. Rules:
 - "correct" is the 0-based index of the right option.
 - Vary which index is correct across the three questions.
 
-Example for the headline "Israel and Hamas agree ceasefire framework" —
-note the script opens on the agreement itself, in six words:
-{"script":"Israel and Hamas have agreed a ceasefire framework. ...","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas"],"quiz":[{"q":"What have the two sides agreed to?","opts":["A ceasefire framework","A prisoner exchange","A permanent peace treaty","A redrawing of the border"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet final","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Who is described as involved?","opts":["Israel and Hamas","Israel and Egypt","Hamas and Jordan","Egypt and Qatar"],"correct":0}]}
+Example — Headline: "Israel and Hamas agree ceasefire framework"
+Summary: "Mediators in Cairo said the two sides had accepted a phased
+framework covering a forty-day truce and staged humanitarian access,
+though neither delegation has signed."
+Note how the script uses the forty days and the phasing, which the
+headline alone does not give:
+{"script":"Israel and Hamas have agreed a ceasefire framework. Mediators in Cairo say the deal covers a forty-day truce, with humanitarian access opening in stages. Neither delegation has signed yet, and both describe the talks as cautious. Earlier rounds collapsed at this same point. What happens next depends on whether either side publicly backs the framework this week.","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas","Cairo"],"quiz":[{"q":"How long is the proposed truce?","opts":["Forty days","One week","Six months","Indefinite"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet signed","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Where are the talks taking place?","opts":["Geneva","Doha","Cairo","Oslo"],"correct":2}]}
 
-Example for the headline "Norway's sovereign wealth fund posts record returns" —
-the record is the hook, so it goes first and the fund's name follows:
-{"script":"Norway's wealth fund has posted record returns. ...","imageQueries":["financial district skyline","stock chart screen","bank vault interior"],"entities":["Government Pension Fund of Norway","Norway"],"quiz":[{"q":"What did the fund report?","opts":["Its first annual loss","A change of leadership","Record returns","A new ethical mandate"],"correct":2},{"q":"Which country's fund is this?","opts":["Sweden","Norway","Denmark","Finland"],"correct":1},{"q":"How do the returns compare with previous years?","opts":["The highest on record","Roughly average","Slightly down","The worst in a decade"],"correct":0}]}
+Example — Headline: "Core inflation cools to two point four percent"
+Summary: "The reading is the lowest in more than a year. Policymakers
+held rates and said they want several more months of data before
+committing to cuts."
+No person, organisation or place is named anywhere, so entities is
+empty. This is the rare case:
+{"script":"Core inflation has cooled to two point four percent. That is the lowest reading in more than a year. Policymakers left rates unchanged and said they want several more months of data before committing to any cuts. Markets had hoped for a clearer signal. The next reading is what decides whether the first cut arrives this year.","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"What did policymakers do with rates?","opts":["Held them","Cut them","Raised them","Suspended the meeting"],"correct":0},{"q":"What do they say they need first?","opts":["A new mandate","Several more months of data","A government request","Lower unemployment"],"correct":1}]}
 
-Example for the headline "Core inflation cools to two point four percent" — no
-person, organisation or place is named anywhere, so entities is empty. This is
-the rare case. The figure is the hook:
-{"script":"Core inflation has cooled to two point four percent. ...","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"Which direction did the figure move?","opts":["Cooled","Rose sharply","Held flat","Doubled"],"correct":0},{"q":"What does the reading describe?","opts":["Unemployment","Core inflation","Trade volume","Housing starts"],"correct":1}]}
+Example — Headline: "Jannik Sinner withdraws from US Open with knee injury"
+Summary: "The world number two pulled out hours before his second-round
+match. His team said scans showed no structural damage."
+Note the player comes before the tournament in entities, because a photo
+of him is more use than a photo of a stadium:
+{"script":"Jannik Sinner has withdrawn from the US Open. The world number two pulled out just hours before his second-round match, citing a knee injury. His team says scans showed no structural damage. It is the second withdrawal of his season. Whether he returns before the end of the year is now the open question.","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"What did the scans show?","opts":["A fracture","Ligament damage","No structural damage","Nothing conclusive"],"correct":2},{"q":"When did he pull out?","opts":["Hours before his second-round match","After losing the first set","Before the tournament began","During the final"],"correct":0}]}
 
-Example for the headline "Jannik Sinner withdraws from US Open with knee injury"
-— note the player comes before the tournament in entities, because a photo of
-him is more use than a photo of a stadium, and the withdrawal leads the script:
-{"script":"Jannik Sinner has withdrawn from the US Open. ...","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"Which tournament has he left?","opts":["Wimbledon","The US Open","The French Open","The Australian Open"],"correct":1},{"q":"What stage had been reached?","opts":["The final","The event was under way","Qualifying had not started","The trophy ceremony"],"correct":1}]}
-
-Example for the headline "Restaurants inside race zone say they are seeing less
-business" — no person is named, but the city and the event are, and both are
-photographable:
-{"script":"Restaurants inside the race zone are losing trade. ...","imageQueries":["empty restaurant tables","street barriers closed road","waiter empty dining room"],"entities":["Washington, D.C.","Street circuit"],"quiz":[{"q":"Who is reporting a downturn?","opts":["Restaurants inside the race zone","Hotels across the city","Ticket resellers","Local broadcasters"],"correct":0},{"q":"What do they say has happened to trade?","opts":["It has fallen","It has doubled","It is unchanged","It has moved online"],"correct":0},{"q":"What is the cause given?","opts":["The race zone","A transport strike","A health scare","A tax change"],"correct":0}]}`;
+Example — a thin story where the source material runs out. Headline:
+"Kanter Freedom is not WNBA-eligible" with no usable Summary. The
+correct response is a SHORT script, not padding:
+{"script":"Enes Kanter Freedom is not WNBA-eligible. The former NBA centre will not play in the league, and the question of an arena ban remains undecided.","imageQueries":["empty basketball arena","basketball hoop closeup","sports press conference"],"entities":["Enes Kanter Freedom","WNBA"],"quiz":[{"q":"What has been ruled about Kanter Freedom?","opts":["He is not WNBA-eligible","He has been signed","He is retiring","He has been fined"],"correct":0},{"q":"What was his previous league?","opts":["The NBA","The EuroLeague","The G League","The NCAA"],"correct":0},{"q":"What remains undecided?","opts":["An arena ban","His salary","His retirement date","A trade"],"correct":0}]}`;
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
@@ -276,10 +315,36 @@ function checkHook(script) {
   }
 }
 
-async function generateScript(headline, category, apiKey) {
+/* Script length is the number to watch after this change. It is logged
+   next to whether a summary was available, because that is the whole
+   hypothesis: no summary should correlate with short scripts, and a
+   summary should let the model reach full length honestly. If scripts
+   stay short WITH a summary present, the prompt is the problem. If they
+   are only short without one, the fix is upstream — get better source
+   material into ingest.js. */
+function checkLength(script, hadDescription) {
+  const words = script.split(/\s+/).filter(Boolean).length;
+  const source = hadDescription ? "headline+summary" : "headline only";
+  if (words < 40) {
+    console.warn("[generate-audio] script is short (" + words + "w, " + source + ")");
+  } else {
+    console.log("[generate-audio] script " + words + "w (" + source + ")");
+  }
+}
+
+async function generateScript(headline, category, apiKey, description) {
+  /* The summary is the difference between a 70-word script and an
+     18-word one. Without it the model has only the headline to work
+     from and correctly refuses to invent detail, so it stops early.
+     Trimmed and length-capped: NewsAPI sometimes returns a truncated
+     paragraph with a "[+1423 chars]" tail, and there is no value in
+     paying for tokens on boilerplate. */
+  const summary = (description || "").trim().slice(0, 600);
+
   const prompt =
     SCRIPT_PROMPT +
     "\n\nHeadline: " + headline +
+    (summary ? "\nSummary: " + summary : "") +
     "\nCategory: " + (category || "news");
 
   const upstream = await fetch(DEEPSEEK_ENDPOINT, {
@@ -330,6 +395,7 @@ async function generateScript(headline, category, apiKey) {
   );
 
   checkHook(parsed.script);
+  checkLength(parsed.script, !!summary);
 
   return parsed;
 }
@@ -388,13 +454,18 @@ export default async function handler(req, res) {
   if (!(await enforceRateLimit(req, res, "generate-audio", 5, 60))) return;
 
   // Two accepted call shapes:
-  //   { storyId, script }                  — script supplied (test harness)
-  //   { storyId, headline, category }      — generate script + queries + quiz
+  //   { storyId, script }                             — script supplied (test harness)
+  //   { storyId, headline, description, category }    — generate script + queries + quiz
   // Passing a script explicitly always wins, so the test page keeps
   // working exactly as before and stays useful for isolating TTS issues
   // without spending an AI call. Note that path produces no quiz — there
   // is no generated script for the model to write questions from.
-  const { storyId, script: providedScript, headline, category, imageQueries: providedQueries } = req.body || {};
+  //
+  // `description` is optional: older queued rows predate the column, and
+  // NewsAPI occasionally returns an article with no summary at all. Both
+  // fall back to headline-only generation, which is exactly the old
+  // behaviour — shorter scripts, but never a failed render.
+  const { storyId, script: providedScript, headline, category, description, imageQueries: providedQueries } = req.body || {};
 
   if (!storyId) {
     res.status(400).json({ error: "storyId is required" });
@@ -453,7 +524,7 @@ export default async function handler(req, res) {
     let promptVersion = null;
 
     if (!script) {
-      const generated = await generateScript(headline, category, deepseekKey);
+      const generated = await generateScript(headline, category, deepseekKey, description);
       script = generated.script;
       if (!imageQueries.length) imageQueries = generated.imageQueries;
       entities = generated.entities;
