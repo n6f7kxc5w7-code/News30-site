@@ -1459,10 +1459,10 @@ const CSS2 = `
 @media(max-width:767px){
   .page{padding:0 12px 100px}
   .grid{grid-template-columns:1fr;row-gap:26px;padding-top:14px}
-  .hd{padding:0 6px}
+   .hd{padding:0 4px;gap:0}
   .hd-brand{padding:0 6px}
-  .hd-center{padding:0 4px}
-  .askbar-btn{width:48px}
+  .hd-brand img{height:19px}
+  .hd-center{display:none}
   .menu{left:8px;right:8px;width:auto;top:calc(var(--hd-h) - 2px)}
   .main{padding-left:0 !important;padding-bottom:56px}
   .ph{font-size:18px;padding:16px 0 2px}
@@ -1473,7 +1473,8 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  .pnl{top:auto;left:0;right:0;bottom:0;height:68%;width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
+   .pnl{top:auto;left:0;right:0;bottom:var(--kb,0px);height:min(68%,calc(100% - var(--kb,0px) - 24px));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease;transition:bottom .18s ease,height .18s ease}
+
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
   .aiv-hero{padding:20px 0 4px}
@@ -1717,7 +1718,8 @@ const NAV = [
   { id: "simplify", label: "Simplify Article", icon: "fileText", short: "Simplify" },
 ];
 
-function Header({ onMenu, onBrand, query, setQuery, onAsk, notifCount, onBell, user, onProfile }) {
+function Header({ onMenu, onBrand, query, setQuery, onAsk, notifCount, onBell, user, onProfile, mobile, onOpenAsk }) {
+
   return (
     <header className="hd">
       <div className="hd-left">
@@ -1744,6 +1746,11 @@ function Header({ onMenu, onBrand, query, setQuery, onAsk, notifCount, onBell, u
         </div>
       </div>
       <div className="hd-right">
+        {mobile && (
+          <button className="ibtn" onClick={onOpenAsk} aria-label="Ask AI">
+            <Icon name="search" />
+          </button>
+        )}
         <button className="ibtn" onClick={onBell} aria-label="Notifications">
           <Icon name="bell" />
           {notifCount > 0 && <span className="dot">{notifCount > 9 ? "9+" : notifCount}</span>}
@@ -3165,6 +3172,28 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 }
 
 /* ═══════════════════ 13 · APP ROOT — state + wiring ════════════════ */
+/* iOS Safari doesn't resize the layout viewport when the keyboard opens,
+   so a position:fixed panel stays put and its input ends up behind the
+   keys. visualViewport reports the real visible area — the difference is
+   the keyboard height, published as --kb for the CSS to sit above. */
+function useKeyboardInset() {
+  React.useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const sync = () => {
+      const hidden = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty("--kb", hidden + "px");
+    };
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    sync();
+    return () => {
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+      document.documentElement.style.removeProperty("--kb");
+    };
+  }, []);
+}
 
 function useViewport() {
   const [w, setW] = React.useState(typeof window !== "undefined" ? window.innerWidth : 1280);
@@ -3184,6 +3213,11 @@ function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
+  const canFull = vw >= 1100;
+
+     useKeyboardInset();
+
+  const [view, setView] = React.useState("home");
 
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
@@ -3425,6 +3459,9 @@ function App() {
       <Header
         onMenu={onMenuBtn}
         onBrand={() => goNav("home")}
+            mobile={mobile}
+                 onOpenAsk={() => goNav("askai")}
+
         query={query} setQuery={setQuery} onAsk={headerAsk}
         notifCount={unread}
         onBell={() => setMenu(menu === "bell" ? null : "bell")}
