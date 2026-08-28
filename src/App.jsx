@@ -16,6 +16,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { Analytics } from '@vercel/analytics/react';
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
@@ -3541,6 +3542,8 @@ function App() {
       {googleOpen && <GoogleModal onPick={onGooglePick} onClose={() => setGoogleOpen(false)} />}
 
       <Toasts items={toasts} />
+      <Analytics />
+
     </React.Fragment>
   );
 }
