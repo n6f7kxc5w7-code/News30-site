@@ -80,6 +80,65 @@
 //    image it uses on job.image_credits — put those in the video
 //    description when you upload. If that becomes a nuisance, tighten
 //    ACCEPTED_LICENCES below to the public-domain entries only.
+//
+// 6. STOCK IS NO LONGER THE UNIVERSAL FALLBACK — TEXT CARDS ARE.
+//    YouTube retention showed a hard cliff at ~4 seconds on two very
+//    different Shorts of different lengths. Five slides across a 16s
+//    video puts the SECOND slide at ~3.2s, and slide two is the first
+//    Pexels image. On a Walmart story that was a photograph of an
+//    unrelated independent boutique; on a Dutch GP story it was a
+//    club-level motorsport helmet, not F1. Slide one (the correct
+//    Wikipedia photo) held ~100% of viewers. Slide two lost half of
+//    them. The mismatch itself is the retention problem: a viewer who
+//    sees the visual contradict the narration concludes the channel has
+//    no real footage and swipes.
+//
+//    So Pexels is now CONDITIONAL rather than automatic:
+//
+//      Tier 1  Wikimedia/Wikipedia entity photos      (as before)
+//      Tier 2  Pexels — ONLY when confident            (new gate)
+//      Tier 3  Rendered text card                      (new)
+//
+//    "Confident" means one of:
+//      (a) the story is purely thematic (no named entities at all), in
+//          which case stock is the right tool and always has been; or
+//      (b) the headline scores a real hit on the keyword map, so we
+//          know which visual bucket it belongs to.
+//
+//    Note what is NOT sufficient: DeepSeek's image_queries alone on an
+//    entity-led story. Those queries are what produced the boutique —
+//    the model correctly described "clothing retail" and Pexels
+//    correctly returned clothing retail, but next to narration about
+//    Walmart specifically, a generic shopfront reads as wrong. The
+//    model's phrases are still used to SEARCH; they just no longer
+//    authorise searching in the first place.
+//
+//    Tier 3 renders a headline card — brand background, white text,
+//    burned in through libass exactly like the captions. Neutral beats
+//    wrong: a card doesn't contradict anything, so a viewer keeps
+//    listening. Capped at MAX_CARDS (1) because three identical cards
+//    would be the repeated-image bug wearing a different hat, and a
+//    3-slide 16s video is perfectly normal news pacing.
+//
+//    LAST RESORT: if entity photos + one card still leave us under
+//    MIN_IMAGE_COUNT, the stock gate is released rather than failing
+//    the render. A possibly-generic photo beats no video at all. This
+//    is logged loudly so it shows up in image_sources.
+//
+//    NOTE: this could not use FFmpeg's `drawtext` filter — Vercel's
+//    bundled static build has no drawtext at all ("No such filter"),
+//    which is the same constraint that pushed captions onto libass.
+//    The card is therefore a `color` lavfi source with a one-line .ass
+//    burned onto it, saved as a JPEG, and then fed through the normal
+//    image path like any other slide.
+//
+//    Requires: alter table video_jobs add column if not exists image_sources jsonb;
+//
+// 7. AAS TEXT IS NOW ESCAPED. buildAss interpolated caption text
+//    straight into the Dialogue line. A headline containing { or } or a
+//    backslash would be parsed as an ASS override tag — silently
+//    dropping text at best, breaking the render at worst. Both the
+//    caption and card builders now run text through assEscape().
 // ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -105,6 +164,24 @@ const FPS = 25;
 // story about three companies still gets some visual variety rather
 // than five near-identical logo shots.
 const MAX_ENTITY_IMAGES = 3;
+
+// How many slots may be filled by a rendered text card. ONE. Two
+// identical cards is a repeated image by another name, and a shorter
+// video is a better outcome than a padded one.
+const MAX_CARDS = 1;
+
+// Card styling. Background is deliberately close to the site's dark
+// theme so the card reads as part of the brand rather than as a
+// failure state.
+const CARD_BG = "0x111318";
+const CARD_FONT_SIZE_MAX = 58;
+const CARD_FONT_SIZE_MIN = 40;
+
+// Fonts live next to this file. Vercel's serverless environment ships
+// NO system fonts, and libass silently draws nothing rather than
+// erroring when it can't find one. Resolved once at module scope
+// because the card renderer needs it before the handler computes it.
+const FONTS_DIR = path.dirname(fileURLToPath(new URL("./LiberationSans-Bold.ttf", import.meta.url)));
 
 // Only these origins may trigger a render. This endpoint spends real
 // money (Pexels quota, Supabase storage, function time), so it must not
@@ -205,6 +282,12 @@ function triggerRegex(trigger) {
 // query list, rather than taking whichever bucket happens to be listed
 // first. A headline hitting three finance words and one military word
 // now correctly reads as finance.
+//
+// Now also reports CONFIDENCE. A real bucket hit means we know what the
+// story looks like. Falling through to the category or generic list
+// means we're guessing, and guessing is what puts a boutique window on
+// a Walmart story. The caller uses this to decide whether Pexels runs
+// at all — see fix #6 in the header.
 function getStockQueries(headline, category) {
   const lower = (headline || "").toLowerCase();
 
@@ -229,8 +312,13 @@ function getStockQueries(headline, category) {
     }
   }
 
-  if (best) return best.queries;
-  return CATEGORY_FALLBACK[(category || "").toLowerCase()] || GENERIC_FALLBACK;
+  if (best) return { queries: best.queries, confident: true, score: bestScore };
+
+  return {
+    queries: CATEGORY_FALLBACK[(category || "").toLowerCase()] || GENERIC_FALLBACK,
+    confident: false,
+    score: 0,
+  };
 }
 
 /* ──────────────────── WIKIMEDIA COMMONS (named entities) ────────────
@@ -522,24 +610,90 @@ async function fetchPexelsImages(queries, count, apiKey, category) {
   return shuffle(pool).slice(0, count).map((p) => p.url);
 }
 
+/* ──────────────────────── TEXT CARDS (tier 3) ───────────────────────
+
+   The honest fallback. When we have no photograph of the actual
+   subject and no confident stock query, we say what the story is
+   rather than showing something that isn't it.
+
+   Rendered as a still JPEG so it enters the pipeline as an ordinary
+   image and needs no special handling downstream beyond skipping the
+   Ken Burns zoom (see buildFilterComplex — zoompan defaults to
+   x=0,y=0, i.e. zooming into the top-left corner, which would slide
+   centred text out of frame over the segment).
+*/
+
+// ASS treats { } as override-tag delimiters and \ as an escape. Text
+// pulled from a headline can contain all three. Newlines terminate the
+// Dialogue line entirely, so they're flattened.
+function assEscape(s) {
+  return String(s || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\{/g, "\\{")
+    .replace(/\}/g, "\\}")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Roughly 560px of usable width at CARD_FONT_SIZE_MAX in Liberation
+// Sans Bold works out around 26 characters per line. Long headlines get
+// stepped down rather than overflowing the frame.
+function cardFontSize(text) {
+  const len = (text || "").length;
+  if (len <= 60) return CARD_FONT_SIZE_MAX;
+  if (len <= 100) return 50;
+  if (len <= 140) return 44;
+  return CARD_FONT_SIZE_MIN;
+}
+
+// Cards get their own .ass rather than reusing buildAss: different
+// alignment (5 = centred both axes), no outline, larger margins, and a
+// single event spanning the whole segment.
+function buildCardAss(text, seconds) {
+  const size = cardFontSize(text);
+  return (
+    "[Script Info]\n" +
+    "ScriptType: v4.00+\n" +
+    "PlayResX: " + WIDTH + "\n" +
+    "PlayResY: " + HEIGHT + "\n" +
+    "WrapStyle: 0\n" +
+    "ScaledBorderAndShadow: yes\n\n" +
+    "[V4+ Styles]\n" +
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
+    "Style: Card,Liberation Sans," + size + ",&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,5,80,80,0,1\n\n" +
+    "[Events]\n" +
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" +
+    // \pos overrides Alignment's centring so the text sits above the
+    // caption band (captions use MarginV=150 from the bottom).
+    "Dialogue: 0,0:00:00.00," + assTimestamp(seconds) +
+    ",Card,,0,0,0,,{\\pos(360,470)}" + assEscape(text) + "\n"
+  );
+}
+
 /**
- * Entity photos first, then stock, alternating after the opener.
+ * Renders one text card to a JPEG.
  *
- * The first frame is the one that decides whether someone keeps
- * watching, so if we have a photograph of the actual subject it leads.
- * After that they alternate: back-to-back Commons images tend to look
- * like an encyclopedia entry, and back-to-back stock looks like a
- * corporate explainer. Alternating reads as edited.
+ * `color` lavfi source for the background, libass for the text. NOT
+ * drawtext — Vercel's bundled static FFmpeg doesn't include it, which
+ * is the same reason captions go through libass.
  */
-function interleaveImages(entityUrls, stockUrls, total) {
-  const out = [];
-  let e = 0, s = 0;
-  if (entityUrls.length) out.push(entityUrls[e++]);
-  while (out.length < total && (e < entityUrls.length || s < stockUrls.length)) {
-    if (s < stockUrls.length) out.push(stockUrls[s++]);
-    if (out.length < total && e < entityUrls.length) out.push(entityUrls[e++]);
-  }
-  return out.slice(0, total);
+async function renderTextCard(text, workDir, index) {
+  const assPath = path.join(workDir, "card" + index + ".ass");
+  const outPath = path.join(workDir, "card" + index + ".jpg");
+
+  await fs.writeFile(assPath, buildCardAss(text, 5), "utf8");
+
+  await execFileAsync(ffmpegPath, [
+    "-f", "lavfi",
+    "-i", "color=c=" + CARD_BG + ":s=" + WIDTH + "x" + HEIGHT + ":d=1",
+    "-vf", "subtitles=" + assPath + ":fontsdir=" + FONTS_DIR,
+    "-frames:v", "1",
+    "-q:v", "2",
+    "-y", outPath,
+  ]);
+
+  return outPath;
 }
 
 async function downloadToFile(url, destPath) {
@@ -614,17 +768,70 @@ function buildAss(captionChunks) {
     "[Events]\n" +
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
 
+  // assEscape: a script containing { } or \ would otherwise be read as
+  // an ASS override tag and silently swallow text.
   const events = captionChunks.map((c) =>
-    "Dialogue: 0," + assTimestamp(parseFloat(c.start)) + "," + assTimestamp(parseFloat(c.end)) + ",Default,,0,0,0,," + c.text
+    "Dialogue: 0," + assTimestamp(parseFloat(c.start)) + "," + assTimestamp(parseFloat(c.end)) + ",Default,,0,0,0,," + assEscape(c.text)
   ).join("\n");
 
   return header + events;
 }
 
+/* ──────────────────────── SLIDE ASSEMBLY ────────────────────────────
+
+   Entity photos first, then stock or card, alternating after the
+   opener.
+
+   The first frame is the one that decides whether someone keeps
+   watching, so if we have a photograph of the actual subject it leads.
+   After that they alternate: back-to-back Commons images tend to look
+   like an encyclopedia entry, and back-to-back stock looks like a
+   corporate explainer. Alternating reads as edited.
+
+   Cards occupy the same position stock would have. That is deliberate
+   — slide two is where the retention cliff sits, so if we don't have a
+   defensible photo for that slot, a card goes there rather than a
+   guess.
+
+   Each item is { path?, url?, source } so the caller can log which
+   tier produced each slide.
+*/
+function assembleSlides(entityItems, stockItems, cardItems, total) {
+  const out = [];
+  let e = 0, s = 0, c = 0;
+
+  if (entityItems.length) out.push(entityItems[e++]);
+
+  while (out.length < total) {
+    let pushed = false;
+
+    if (s < stockItems.length) {
+      out.push(stockItems[s++]);
+      pushed = true;
+    } else if (c < cardItems.length) {
+      out.push(cardItems[c++]);
+      pushed = true;
+    }
+
+    if (out.length < total && e < entityItems.length) {
+      out.push(entityItems[e++]);
+      pushed = true;
+    }
+
+    if (!pushed) break;
+  }
+
+  return out.slice(0, total);
+}
+
 /* ──────────────────────────── FFMPEG GRAPH ──────────────────────────── */
 
-function buildFilterComplex(imagePaths, assPath, fontsDir, totalSeconds) {
-  const perImageSeconds = totalSeconds / imagePaths.length;
+// `slides` is [{ path, isCard }]. Cards skip zoompan: the filter
+// defaults to x=0,y=0, so it zooms into the top-left corner rather than
+// the centre. That's unobjectionable on a photograph and disastrous on
+// centred text, which would drift out of frame across the segment.
+function buildFilterComplex(slides, assPath, fontsDir, totalSeconds) {
+  const perImageSeconds = totalSeconds / slides.length;
   const framesPerImage = Math.max(1, Math.round(perImageSeconds * FPS));
 
   // Zoom ramps from 1.0 to ZOOM_MAX across the segment. Derived from the
@@ -633,26 +840,36 @@ function buildFilterComplex(imagePaths, assPath, fontsDir, totalSeconds) {
   const zoomStep = (ZOOM_MAX - 1) / framesPerImage;
 
   const parts = [];
-  const zoomLabels = [];
+  const labels = [];
 
-  imagePaths.forEach((_, i) => {
-    parts.push(
+  slides.forEach((slide, i) => {
+    const base =
       "[" + i + ":v]scale=" + WIDTH + ":" + HEIGHT + ":force_original_aspect_ratio=increase," +
       "crop=" + WIDTH + ":" + HEIGHT + "," +
-      "setsar=1," +
-      // d=1 — one output frame per input frame. The input is already a
-      // looped image stream of the right length, so anything higher
-      // multiplies the frame count (this was the whole-video-is-one-image
-      // bug). `on` is the output frame index, giving a smooth linear ramp
-      // without relying on zoom accumulating between frames.
-      "zoompan=z='min(1+" + zoomStep.toFixed(6) + "*on," + ZOOM_MAX + ")'" +
-      ":d=1:s=" + WIDTH + "x" + HEIGHT + ":fps=" + FPS +
-      "[v" + i + "]"
-    );
-    zoomLabels.push("[v" + i + "]");
+      "setsar=1,";
+
+    if (slide.isCard) {
+      // Static. fps= pins the segment to the timeline rate so the
+      // concat downstream sees a consistent stream.
+      parts.push(base + "fps=" + FPS + "[v" + i + "]");
+    } else {
+      parts.push(
+        base +
+        // d=1 — one output frame per input frame. The input is already a
+        // looped image stream of the right length, so anything higher
+        // multiplies the frame count (this was the whole-video-is-one-image
+        // bug). `on` is the output frame index, giving a smooth linear ramp
+        // without relying on zoom accumulating between frames.
+        "zoompan=z='min(1+" + zoomStep.toFixed(6) + "*on," + ZOOM_MAX + ")'" +
+        ":d=1:s=" + WIDTH + "x" + HEIGHT + ":fps=" + FPS +
+        "[v" + i + "]"
+      );
+    }
+
+    labels.push("[v" + i + "]");
   });
 
-  parts.push(zoomLabels.join("") + "concat=n=" + imagePaths.length + ":v=1:a=0[vconcat]");
+  parts.push(labels.join("") + "concat=n=" + slides.length + ":v=1:a=0[vconcat]");
 
   // Captions burned in via libass's `subtitles` filter, not `drawtext` —
   // Vercel's bundled static FFmpeg has no drawtext ("No such filter"),
@@ -764,16 +981,17 @@ export default async function handler(req, res) {
     // wall-clock time matters against Vercel's 60s function limit.
     const audioPath = path.join(workDir, "audio.mp3");
     let imageCredits = [];
+    let imageSources = [];
 
-    const [imagePaths] = await Promise.all([
+    const [slidePaths] = await Promise.all([
       (async () => {
         const entities = Array.isArray(job.entities)
           ? job.entities.filter((e) => typeof e === "string" && e.trim()).slice(0, MAX_ENTITY_IMAGES)
           : [];
 
-        // 1) Real photographs of whatever the story is actually about.
-        //    Skipped entirely for thematic stories, which have no
-        //    entities and are better served by stock anyway.
+        /* ── TIER 1: real photographs of the actual subject ─────────
+           Skipped entirely for thematic stories, which have no
+           entities and are better served by stock anyway. */
         let entityImages = [];
         if (entities.length) {
           entityImages = await fetchWikimediaImages(entities, MAX_ENTITY_IMAGES);
@@ -784,51 +1002,116 @@ export default async function handler(req, res) {
         }
         imageCredits = entityImages.map((i) => i.credit).filter(Boolean);
 
-        // 2) Stock fills the rest. Prefer the model's search phrases —
-        //    it understands that "ceasefire framework" should look like
-        //    a negotiation table, whereas the keyword map can only
-        //    recognise vocabulary it was written for. The map stays as a
-        //    fallback so a missing or unparseable response degrades to
-        //    the old behaviour instead of failing the render.
+        /* ── TIER 2: stock, but only when we can defend it ──────────
+
+           The gate, not the query. Two things decide whether Pexels
+           runs at all:
+
+             - a purely thematic story (no entities) is exactly what
+               stock is for, and always has been; or
+             - the headline scored a real hit on the keyword map, so we
+               know which visual bucket it belongs to.
+
+           DeepSeek's image_queries are deliberately NOT sufficient on
+           their own for an entity-led story. Those queries are what
+           put an unrelated boutique next to narration about Walmart:
+           the model correctly described "clothing retail", Pexels
+           correctly returned clothing retail, and the viewer correctly
+           concluded we had no footage of Walmart. The model's phrases
+           still drive the SEARCH — they're better than the keyword map
+           at describing what a story looks like — they just no longer
+           authorise searching. */
+        const keywordMatch = getStockQueries(headline, category);
+        const isThematic = entities.length === 0;
+        let stockAllowed = isThematic || keywordMatch.confident;
+
         const fromModel = Array.isArray(job.image_queries) ? job.image_queries : [];
         const usingModel = fromModel.length > 0;
-        const queries = usingModel ? fromModel : getStockQueries(headline, category);
+        const queries = usingModel ? fromModel : keywordMatch.queries;
+
+        /* ── TIER 3: the honest fallback ────────────────────────────
+           Capped at MAX_CARDS. Two identical headline cards is the
+           repeated-image bug wearing a hat, and three slides over 16s
+           is normal news pacing. */
+        const cardSlots = stockAllowed ? 0 : Math.min(MAX_CARDS, IMAGE_COUNT - entityImages.length);
+
+        // Would entity photos + cards leave us too short to render?
+        // Release the gate rather than fail — a possibly-generic photo
+        // beats no video. Logged loudly so it's visible in
+        // image_sources afterwards.
+        if (!stockAllowed && entityImages.length + cardSlots < MIN_IMAGE_COUNT) {
+          console.warn(
+            "[generate-video] stock gate released as last resort —",
+            entityImages.length, "entity +", cardSlots, "card <", MIN_IMAGE_COUNT
+          );
+          stockAllowed = true;
+        }
+
         console.log(
-          "[generate-video] stock queries (" + (usingModel ? "model" : "keyword map") + "):",
+          "[generate-video] stock", stockAllowed ? "ALLOWED" : "BLOCKED",
+          "(" + (isThematic ? "thematic" : "entity-led") +
+          ", keyword score " + keywordMatch.score + ")",
+          "| queries (" + (usingModel ? "model" : "keyword map") + "):",
           queries.join(" | ")
         );
 
         let stockUrls = [];
-        try {
-          stockUrls = await fetchPexelsImages(
-            queries, IMAGE_COUNT - entityImages.length, pexelsKey, category
-          );
-        } catch (e) {
-          // A Pexels failure is survivable if Commons already gave us
-          // enough to work with — the check below decides.
-          console.warn("[generate-video] Pexels failed:", String(e).slice(0, 160));
+        if (stockAllowed) {
+          try {
+            stockUrls = await fetchPexelsImages(
+              queries, IMAGE_COUNT - entityImages.length, pexelsKey, category
+            );
+          } catch (e) {
+            // A Pexels failure is survivable if Commons already gave us
+            // enough to work with — the check below decides.
+            console.warn("[generate-video] Pexels failed:", String(e).slice(0, 160));
+          }
         }
 
-        const imageUrls = interleaveImages(
-          entityImages.map((i) => i.url), stockUrls, IMAGE_COUNT
-        );
+        // Cards are rendered only if they'll actually be used. Recompute
+        // now that we know how much stock actually came back.
+        const stillShort = IMAGE_COUNT - entityImages.length - stockUrls.length;
+        const cardsToRender = Math.min(MAX_CARDS, Math.max(cardSlots, stillShort > 0 ? 1 : 0));
 
-        if (imageUrls.length < MIN_IMAGE_COUNT) {
+        const cardItems = [];
+        for (let i = 0; i < cardsToRender; i++) {
+          try {
+            const p = await renderTextCard(headline, workDir, i);
+            cardItems.push({ path: p, source: "card", isCard: true });
+            console.log("[generate-video] rendered text card", i);
+          } catch (e) {
+            // A card that won't render is not worth failing over; the
+            // MIN_IMAGE_COUNT check below is the real backstop.
+            console.warn("[generate-video] card render failed:", String(e).slice(0, 200));
+          }
+        }
+
+        const entityItems = entityImages.map((i) => ({
+          url: i.url, source: i.source, isCard: false,
+        }));
+        const stockItems = stockUrls.map((u) => ({
+          url: u, source: "pexels", isCard: false,
+        }));
+
+        const slides = assembleSlides(entityItems, stockItems, cardItems, IMAGE_COUNT);
+
+        if (slides.length < MIN_IMAGE_COUNT) {
           throw new Error(
-            "Only " + imageUrls.length + " usable images (" + entityImages.length +
-            " Commons, " + stockUrls.length + " Pexels) for: " + queries.join(" / ")
+            "Only " + slides.length + " usable slides (" + entityImages.length +
+            " Commons, " + stockUrls.length + " Pexels, " + cardItems.length +
+            " card) for: " + queries.join(" / ")
           );
         }
 
-        console.log(
-          "[generate-video] using", imageUrls.length, "images —",
-          entityImages.length, "entity,", imageUrls.length - entityImages.length, "stock"
-        );
+        imageSources = slides.map((s) => s.source);
+        console.log("[generate-video] slide order:", imageSources.join(" → "));
 
-        return Promise.all(imageUrls.map(async (url, i) => {
+        // Cards are already on disk; everything else needs downloading.
+        return Promise.all(slides.map(async (slide, i) => {
+          if (slide.isCard) return { path: slide.path, isCard: true };
           const dest = path.join(workDir, "img" + i + ".jpg");
-          await downloadToFile(url, dest);
-          return dest;
+          await downloadToFile(slide.url, dest);
+          return { path: dest, isCard: false };
         }));
       })(),
       downloadToFile(job.audio_url, audioPath),
@@ -839,27 +1122,26 @@ export default async function handler(req, res) {
     // 30s assumption, which is what caused captions to drift on longer
     // scripts.
     const realDuration = await getAudioDuration(audioPath);
-    const segmentSeconds = realDuration / imagePaths.length;
+    const segmentSeconds = realDuration / slidePaths.length;
 
     const captionChunks = buildCaptionChunks(job.script || headline, realDuration);
     const assPath = path.join(workDir, "captions.ass");
     await fs.writeFile(assPath, buildAss(captionChunks), "utf8");
-    const fontsDir = path.dirname(fileURLToPath(new URL("./LiberationSans-Bold.ttf", import.meta.url)));
-    const { filterComplex, finalLabel } = buildFilterComplex(imagePaths, assPath, fontsDir, realDuration);
+    const { filterComplex, finalLabel } = buildFilterComplex(slidePaths, assPath, FONTS_DIR, realDuration);
 
     const outputPath = path.join(workDir, "output.mp4");
     const args = [];
-    imagePaths.forEach((p) => {
+    slidePaths.forEach((s) => {
       // -framerate pins the looped still to our timeline fps, so the
       // input frame count is exactly segmentSeconds * FPS and lines up
       // with the zoom ramp computed in buildFilterComplex.
-      args.push("-loop", "1", "-framerate", String(FPS), "-t", segmentSeconds.toFixed(3), "-i", p);
+      args.push("-loop", "1", "-framerate", String(FPS), "-t", segmentSeconds.toFixed(3), "-i", s.path);
     });
     args.push("-i", audioPath);
     args.push(
       "-filter_complex", filterComplex,
       "-map", "[" + finalLabel + "]",
-      "-map", imagePaths.length + ":a",
+      "-map", slidePaths.length + ":a",
       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
       "-r", String(FPS),
       "-c:a", "aac",
@@ -927,6 +1209,12 @@ export default async function handler(req, res) {
         // stories illustrated entirely with stock or public-domain
         // files. Paste these into the YouTube description.
         image_credits: imageCredits.length ? imageCredits : null,
+        // Which tier produced each slide, in order. This is the whole
+        // point of the logging: if "pexels" still dominates slide two,
+        // the gate isn't tight enough; if "card" dominates everywhere,
+        // entity extraction upstream is the real problem and no amount
+        // of fallback tuning will fix it.
+        image_sources: imageSources.length ? imageSources : null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
@@ -941,8 +1229,9 @@ export default async function handler(req, res) {
       thumbnailUrl,
       durationSeconds: Number(realDuration.toFixed(2)),
       status: "done",
-      imageCount: imagePaths.length,
+      imageCount: slidePaths.length,
       imageCredits,
+      imageSources,
     });
   } catch (e) {
     console.error("[generate-video] render failed:", e);
