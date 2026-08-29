@@ -170,6 +170,41 @@ const MAX_ENTITY_IMAGES = 3;
 // video is a better outcome than a padded one.
 const MAX_CARDS = 1;
 
+/* CROSS-VIDEO IMAGE HISTORY.
+
+   Dedupe used to be per-render: every job started with an empty `seen`
+   set, so the same photo could headline three different videos in a
+   week. Stock libraries are shallow for any given query — Pexels has
+   only so many "stock market trading screen" photos, and the same
+   handful rank top on every request — so two finance stories a day
+   apart would genuinely pull identical imagery. Viewers reading the
+   channel as a feed notice that far more than any single video's
+   internal repetition.
+
+   So recently-used Pexels IDs are persisted and excluded from future
+   renders. NOT applied to Wikimedia: if two stories are both about
+   Walmart, the same Walmart photograph appearing in both is correct
+   rather than lazy, and suppressing it would push an entity story back
+   onto stock — which is the exact failure this pipeline was rebuilt to
+   avoid.
+
+   Exclusion is a PREFERENCE, not a hard filter. If honouring it would
+   leave too few images to fill the video, previously-used photos are
+   allowed back in rather than failing the render.
+
+   Requires:
+     create table if not exists used_images (
+       pexels_id bigint primary key,
+       used_at   timestamptz not null default now()
+     );
+     create index if not exists used_images_used_at_idx on used_images (used_at desc);
+     alter table used_images enable row level security;
+     -- no policies: the service role bypasses RLS, and nothing else
+     -- should be reading this table.
+*/
+const IMAGE_HISTORY_DAYS = 30;
+const IMAGE_HISTORY_LIMIT = 5000; // ~30 days at 5 images x 30 videos/day
+
 // Card styling. Background is deliberately close to the site's dark
 // theme so the card reads as part of the brand rather than as a
 // failure state.
@@ -540,12 +575,71 @@ function shuffle(arr) {
   return out;
 }
 
+/**
+ * Recently-used Pexels IDs, for cross-video exclusion.
+ *
+ * Never throws. If the history lookup fails the render proceeds with an
+ * empty set — a possibly-repeated photo is a far better outcome than a
+ * failed video, and this table is an optimisation, not a dependency.
+ */
+async function fetchRecentlyUsedImageIds(supabase) {
+  try {
+    const cutoff = new Date(Date.now() - IMAGE_HISTORY_DAYS * 86400000).toISOString();
+    const { data, error } = await supabase
+      .from("used_images")
+      .select("pexels_id")
+      .gt("used_at", cutoff)
+      .order("used_at", { ascending: false })
+      .limit(IMAGE_HISTORY_LIMIT);
+
+    if (error) {
+      console.warn("[generate-video] image history lookup failed:", error.message);
+      return new Set();
+    }
+    return new Set((data || []).map((r) => r.pexels_id));
+  } catch (e) {
+    console.warn("[generate-video] image history errored:", String(e).slice(0, 160));
+    return new Set();
+  }
+}
+
+/**
+ * Records the Pexels IDs this render actually used.
+ *
+ * Upsert rather than insert: a photo allowed back in as a last resort
+ * should have its timestamp refreshed, not collide on the primary key
+ * and abort the batch.
+ *
+ * Called after the video is safely uploaded, and never fatal — losing a
+ * history row means one photo might repeat sooner than intended, which
+ * is not worth failing a finished render over.
+ */
+async function recordUsedImages(supabase, ids) {
+  if (!ids.length) return;
+  try {
+    const now = new Date().toISOString();
+    const rows = ids.map((id) => ({ pexels_id: id, used_at: now }));
+    const { error } = await supabase
+      .from("used_images")
+      .upsert(rows, { onConflict: "pexels_id" });
+    if (error) console.warn("[generate-video] image history write failed:", error.message);
+  } catch (e) {
+    console.warn("[generate-video] image history write errored:", String(e).slice(0, 160));
+  }
+}
+
 // Fetches a POOL of candidates per query rather than exactly `count`,
 // then dedupes by Pexels photo id and shuffles. Pulling a pool is what
 // makes genuine variety possible: asking for exactly 5 and taking all 5
 // means any duplicate or dud in that set has no replacement available.
-async function fetchPexelsImages(queries, count, apiKey, category) {
+//
+// `excludeIds` holds photos used in the last IMAGE_HISTORY_DAYS. They're
+// deprioritised rather than banned — see the selection step at the end.
+//
+// Returns [{ id, url }] so the caller can record what it used.
+async function fetchPexelsImages(queries, count, apiKey, category, excludeIds) {
   if (count <= 0) return [];
+  const exclude = excludeIds || new Set();
 
   const POOL_PER_QUERY = 15;
   const randomPage = () => 1 + Math.floor(Math.random() * 3);
@@ -597,17 +691,42 @@ async function fetchPexelsImages(queries, count, apiKey, category) {
   // Dropping the portrait filter roughly triples the available pool.
   // We scale-and-crop to 720x1280 anyway, so a landscape source is
   // usable — just more aggressively cropped.
-  if (pool.length < count) {
+  //
+  // The pool size that matters here is the pool of photos we haven't
+  // already used, not the raw pool — otherwise a topic whose top
+  // results all appeared last week would never widen.
+  const freshCount = () => pool.filter((p) => !exclude.has(p.id)).length;
+
+  if (freshCount() < count) {
     const anyOrientation = await Promise.all(
       queries.map((q) => search(q, null).catch(() => []))
     );
     anyOrientation.forEach(addAll);
   }
 
-  // Shuffle so two videos on the same topic don't open on the same shot,
-  // then take what we need. Note we return however many unique photos we
-  // have — a shorter rotation is better than a repeated one.
-  return shuffle(pool).slice(0, count).map((p) => p.url);
+  // Shuffle so two videos on the same topic don't open on the same shot.
+  //
+  // Photos used in the last IMAGE_HISTORY_DAYS go to the back of the
+  // queue rather than being dropped outright. A repeat is mildly
+  // disappointing; a video that won't render because the good photos
+  // were all used last month is worse. In practice the fresh set covers
+  // it — the fallback only fires on genuinely thin topics.
+  const fresh = shuffle(pool.filter((p) => !exclude.has(p.id)));
+  const chosen = fresh.slice(0, count);
+
+  if (chosen.length < count) {
+    const stale = shuffle(pool.filter((p) => exclude.has(p.id)));
+    const shortfall = count - chosen.length;
+    chosen.push(...stale.slice(0, shortfall));
+    if (stale.length) {
+      console.warn(
+        "[generate-video] reusing", Math.min(shortfall, stale.length),
+        "previously-used photo(s) — fresh pool was only", fresh.length
+      );
+    }
+  }
+
+  return chosen.map((p) => ({ id: p.id, url: p.url }));
 }
 
 /* ──────────────────────── TEXT CARDS (tier 3) ───────────────────────
@@ -982,6 +1101,7 @@ export default async function handler(req, res) {
     const audioPath = path.join(workDir, "audio.mp3");
     let imageCredits = [];
     let imageSources = [];
+    let usedPexelsIds = [];
 
     const [slidePaths] = await Promise.all([
       (async () => {
@@ -1055,11 +1175,17 @@ export default async function handler(req, res) {
           queries.join(" | ")
         );
 
-        let stockUrls = [];
+        let stockPhotos = [];
         if (stockAllowed) {
           try {
-            stockUrls = await fetchPexelsImages(
-              queries, IMAGE_COUNT - entityImages.length, pexelsKey, category
+            // Cross-video history. Fetched only when stock is actually
+            // going to run — no point querying it on an entity-led or
+            // card-filled story.
+            const recentlyUsed = await fetchRecentlyUsedImageIds(supabase);
+            console.log("[generate-video] excluding", recentlyUsed.size, "recently-used photos");
+
+            stockPhotos = await fetchPexelsImages(
+              queries, IMAGE_COUNT - entityImages.length, pexelsKey, category, recentlyUsed
             );
           } catch (e) {
             // A Pexels failure is survivable if Commons already gave us
@@ -1070,7 +1196,7 @@ export default async function handler(req, res) {
 
         // Cards are rendered only if they'll actually be used. Recompute
         // now that we know how much stock actually came back.
-        const stillShort = IMAGE_COUNT - entityImages.length - stockUrls.length;
+        const stillShort = IMAGE_COUNT - entityImages.length - stockPhotos.length;
         const cardsToRender = Math.min(MAX_CARDS, Math.max(cardSlots, stillShort > 0 ? 1 : 0));
 
         const cardItems = [];
@@ -1089,8 +1215,8 @@ export default async function handler(req, res) {
         const entityItems = entityImages.map((i) => ({
           url: i.url, source: i.source, isCard: false,
         }));
-        const stockItems = stockUrls.map((u) => ({
-          url: u, source: "pexels", isCard: false,
+        const stockItems = stockPhotos.map((p) => ({
+          url: p.url, pexelsId: p.id, source: "pexels", isCard: false,
         }));
 
         const slides = assembleSlides(entityItems, stockItems, cardItems, IMAGE_COUNT);
@@ -1098,12 +1224,15 @@ export default async function handler(req, res) {
         if (slides.length < MIN_IMAGE_COUNT) {
           throw new Error(
             "Only " + slides.length + " usable slides (" + entityImages.length +
-            " Commons, " + stockUrls.length + " Pexels, " + cardItems.length +
+            " Commons, " + stockPhotos.length + " Pexels, " + cardItems.length +
             " card) for: " + queries.join(" / ")
           );
         }
 
         imageSources = slides.map((s) => s.source);
+        // Only what actually made the cut — assembleSlides may drop
+        // surplus photos when entity images and cards fill the video.
+        usedPexelsIds = slides.map((s) => s.pexelsId).filter((id) => id != null);
         console.log("[generate-video] slide order:", imageSources.join(" → "));
 
         // Cards are already on disk; everything else needs downloading.
@@ -1218,6 +1347,11 @@ export default async function handler(req, res) {
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
+
+    // Written only after the video is safely uploaded — recording a
+    // photo as used when the render then failed would burn it out of
+    // the pool for a month for nothing.
+    await recordUsedImages(supabase, usedPexelsIds);
 
     if (imageCredits.length) {
       console.log("[generate-video] attribution required:", imageCredits.join(" // "));
