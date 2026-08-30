@@ -2,21 +2,39 @@
 // 🎬 STAGE 2 OF THE AUTOMATED PIPELINE — turns one queued story into a
 // finished, published video.
 //
-// Handles exactly ONE story per invocation, then calls itself for the
-// next. That design is forced by Vercel's function time limit: nine
-// renders cannot happen in one request, and a loop would be killed
-// partway through leaving rows stuck in `generating`.
+// Handles exactly ONE story per invocation, then returns. That design is
+// forced by Vercel's function time limit: nine renders cannot happen in
+// one request, and a loop would be killed partway through leaving rows
+// stuck in `generating`.
 //
-// ─── WHY SELF-CHAINING RATHER THAN A FREQUENT CRON ───────────────
-// The obvious alternative is a cron that fires every few minutes and
-// takes one job each time. Vercel's Hobby plan restricts how often cron
-// can run, so nine stories could take days to clear. Chaining sidesteps
-// the frequency limit entirely: each invocation is a fresh function
-// with a fresh time budget, and the queue drains in minutes.
+// ─── WHY THIS NO LONGER SELF-CHAINS ──────────────────────────────
+// It used to call itself for the next story, awaiting each kick long
+// enough to confirm the request was accepted. That was written when
+// Vercel Cron drove the pipeline and its Hobby-plan frequency limit
+// meant nine stories could otherwise take days to clear.
 //
-// The chain terminates on its own — there is no next call when nothing
-// is pending. MAX_CHAIN is a second guard so a bug cannot produce an
-// endless loop spending money.
+// It broke. Because the parent awaited the kick, each link stayed alive
+// while its child ran, so the invocations NESTED rather than running one
+// after another — up to MAX_CHAIN deep, with generate-audio and
+// generate-video nested inside each level again. Vercel detects a
+// function chain that recurses into itself and refuses it, returning a
+// 508 whose body is the plain text `Infinite loop detected`. The next
+// line here was `await audioRes.json()`, which threw:
+//
+//     Unexpected token 'I', "Infinite l"... is not valid JSON
+//
+// That error is what filled the `error` column on published_stories from
+// 26 August onward. The stories were never scripted, so they never
+// reached `ready`, so the site's feed — which reads `ready` rows —
+// froze at the 26th while video_jobs kept happily draining older work
+// and looked healthy the whole time.
+//
+// The original reason for chaining is also gone: the pipeline moved off
+// Vercel Cron to GitHub Actions, which has no frequency limit worth
+// worrying about. So the loop now lives OUTSIDE the function, in
+// .github/workflows/process.yml, which pokes this endpoint once a
+// minute. Every poke is a fresh external request, so Vercel never sees
+// a function invoking itself and the queue still drains in minutes.
 //
 // Security: requires CRON_SECRET, same as ingest.
 //
@@ -26,7 +44,6 @@
 import { createClient } from "@supabase/supabase-js";
 
 const MAX_ATTEMPTS = 2;   // one retry, then leave it alone
-const MAX_CHAIN = 12;     // hard stop; 9 stories plus headroom
 
 export default async function handler(req, res) {
   const secret = process.env.CRON_SECRET;
@@ -54,13 +71,6 @@ export default async function handler(req, res) {
 
   const supabase = createClient(supabaseUrl, serviceKey);
   const base = "https://" + (req.headers.host || "news30.live");
-  const chainDepth = parseInt(req.headers["x-chain-depth"] || "0", 10);
-
-  if (chainDepth >= MAX_CHAIN) {
-    console.warn("[process] chain depth limit reached — stopping");
-    res.status(200).json({ ok: true, stopped: "chain limit" });
-    return;
-  }
 
   try {
     // Rows stuck in `generating` mean a previous invocation died
@@ -87,13 +97,17 @@ export default async function handler(req, res) {
     if (pickErr) throw pickErr;
 
     if (!story) {
+      // Not an error, and the workflow keeps poking regardless — an
+      // empty queue simply means this poke had nothing to do.
       console.log("[process] queue empty");
       res.status(200).json({ ok: true, done: true });
       return;
     }
 
-    // Claim it immediately. If two invocations ever overlap, whichever
-    // writes second finds the row already claimed on its next poll.
+    // Claim it immediately. The workflow pokes once a minute and a
+    // render can outlast that, so overlapping invocations are now
+    // NORMAL rather than exceptional: whichever writes second finds the
+    // row already claimed and picks up the next one instead.
     await supabase
       .from("published_stories")
       .update({
@@ -134,7 +148,21 @@ export default async function handler(req, res) {
         }),
       });
 
-      const audioData = await audioRes.json();
+      // Read as text first, then parse. A non-JSON body here used to
+      // throw a raw SyntaxError whose message ("Unexpected token 'I'…")
+      // said nothing about where it came from, and that cost days of
+      // looking in the wrong place. Now the status and the first part of
+      // the body reach the logs and the error column intact.
+      const audioText = await audioRes.text();
+      let audioData;
+      try {
+        audioData = JSON.parse(audioText);
+      } catch {
+        throw new Error(
+          "generate-audio returned non-JSON (" + audioRes.status + "): " +
+          audioText.slice(0, 200)
+        );
+      }
       if (!audioRes.ok) throw new Error(audioData.error || "audio failed");
       jobId = audioData.jobId;
 
@@ -152,7 +180,16 @@ export default async function handler(req, res) {
         }),
       });
 
-      const videoData = await videoRes.json();
+      const videoText = await videoRes.text();
+      let videoData;
+      try {
+        videoData = JSON.parse(videoText);
+      } catch {
+        throw new Error(
+          "generate-video returned non-JSON (" + videoRes.status + "): " +
+          videoText.slice(0, 200)
+        );
+      }
       if (!videoRes.ok) throw new Error(videoData.error || "render failed");
 
       // ── Publish ─────────────────────────────────────────────────
@@ -202,7 +239,7 @@ export default async function handler(req, res) {
       console.error("[process] story failed:", story.id, message);
 
       // Below MAX_ATTEMPTS it goes back to pending and will be retried
-      // on a later pass; at the limit it is marked failed and skipped,
+      // on a later poke; at the limit it is marked failed and skipped,
       // so one broken story cannot consume the whole budget.
       const exhausted = story.attempts + 1 >= MAX_ATTEMPTS;
       await supabase
@@ -215,53 +252,10 @@ export default async function handler(req, res) {
         .eq("id", story.id);
     }
 
-    // ── Chain to the next story ─────────────────────────────────────
-    // This used to be a bare `fetch(...).catch(() => {})` with no await,
-    // immediately followed by res.status(200). That does not work on
-    // Vercel: the platform freezes the function the moment the response
-    // is sent, so an in-flight request that hasn't completed its
-    // handshake is killed. Whether the next link fired came down to
-    // whether the socket happened to open in time — which is why the
-    // queue drained a story or two and then sat still until the next
-    // ingest kicked it hours later.
-    //
-    // Same fix ingest.js already uses for its own worker kick: await
-    // long enough to confirm the request was ACCEPTED, then stop
-    // waiting. AbortController cancels our wait, not the next
-    // invocation — that keeps running server-side regardless.
-    const kickController = new AbortController();
-    const kickTimeout = setTimeout(() => kickController.abort(), 5000);
-
-    try {
-      const kickRes = await fetch(base + "/api/cron/process", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + secret,
-          "x-chain-depth": String(chainDepth + 1),
-        },
-        signal: kickController.signal,
-      });
-      clearTimeout(kickTimeout);
-      if (!kickRes.ok) {
-        console.error("[process] chain link rejected at depth", chainDepth + 1, ":", kickRes.status);
-      } else {
-        console.log("[process] chain link accepted at depth", chainDepth + 1);
-      }
-    } catch (kickErr) {
-      clearTimeout(kickTimeout);
-      if (kickErr.name === "AbortError") {
-        // Expected and fine: the next story is already rendering and
-        // won't answer within 5s. The chain is alive; we just stopped
-        // watching it.
-        console.log("[process] chain link sent, next story still rendering after 5s (normal)");
-      } else {
-        // The chain is genuinely broken here — the queue will now sit
-        // until the next ingest kicks it. Worth seeing in the logs.
-        console.error("[process] chain link failed to send at depth", chainDepth + 1, ":", kickErr);
-      }
-    }
-
-    res.status(200).json({ ok: true, processed: story.id, depth: chainDepth });
+    // One story, then stop. The next one is picked up by the next poke
+    // from the workflow — see the header comment for why this is no
+    // longer a self-call.
+    res.status(200).json({ ok: true, processed: story.id });
   } catch (e) {
     console.error("[process] fatal:", e);
     res.status(500).json({ error: "Worker failed" });
