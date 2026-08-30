@@ -1,4 +1,27 @@
+# .github/workflows/process.yml
+#
+# Drives the render queue from OUTSIDE Vercel.
+#
+# process.js used to call itself for the next story. Because it awaited
+# each kick, the invocations nested instead of running one after
+# another, and Vercel refused the recursion with a 508 whose body is the
+# plain text `Infinite loop detected`. See the header comment in
+# api/cron/process.js for the full story.
+#
+# Each curl below is a fresh external request, so nothing ever nests.
+# process.js handles exactly one story per poke and returns.
+#
+# 14 pokes a minute apart covers the 15-minute schedule with a small
+# gap before the next run, so two runs never overlap. GitHub's
+# scheduler is best-effort and can be several minutes late under load,
+# which is fine here: a late poke just means the queue drains slightly
+# slower, and workflow_dispatch is always available to force one.
+#
+# `|| true` on the curl means a single failed poke — a cold start, a
+# blip, a render that outlasts the client timeout — does not fail the
+# whole run and skip the remaining pokes.
 name: Nudge worker
+
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -8,5 +31,14 @@ jobs:
   nudge:
     runs-on: ubuntu-latest
     steps:
-      - name: Poke process endpoint
-        run: 'curl -sS -L -X POST https://www.news30.live/api/cron/process -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"'
+      - name: Poke process endpoint repeatedly
+        run: |
+          for i in $(seq 1 14); do
+            echo "--- poke $i of 14 ---"
+            curl -sS -L -X POST https://www.news30.live/api/cron/process \
+              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+              --max-time 55 || true
+            echo
+            sleep 60
+          done
+
