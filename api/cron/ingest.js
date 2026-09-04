@@ -1,11 +1,11 @@
 // /api/cron/ingest.js
 // 🗞 STAGE 1 OF THE AUTOMATED PIPELINE — decides what is worth making
-// a video about, and queues it.
+// a video about, queues it, and clears out old media.
 //
-// Runs on a schedule (see vercel.json). Does NOT render anything: it
-// fetches headlines, works out which stories are actually significant,
-// writes the top three per category into published_stories as
-// `pending`, then kicks the worker. Selection is fast; rendering is
+// Runs on a schedule (see .github/workflows/ingest.yml). Does NOT render
+// anything: it fetches headlines, works out which stories are actually
+// significant, writes the top three per category into published_stories
+// as `pending`, then kicks the worker. Selection is fast; rendering is
 // slow. Keeping them in separate functions is what makes the whole
 // thing fit inside Vercel's execution limit.
 //
@@ -35,8 +35,8 @@
 // headlines score badly regardless of corroboration.
 //
 // Security: this endpoint spends money, so it requires CRON_SECRET.
-// Vercel Cron sends it automatically as a bearer token; anyone else
-// calling the URL gets a 401.
+// GitHub Actions sends it as a bearer token; anyone else calling the
+// URL gets a 401.
 //
 // Requires: alter table published_stories add column if not exists description text;
 
@@ -57,6 +57,50 @@ const HEADLINES_TO_CONSIDER = 40; // pool per category before ranking
    appends — that tail is boilerplate the model would have to be told
    to ignore. 600 characters comfortably holds a full summary. */
 const MAX_DESCRIPTION = 600;
+
+/* ─────────────────── MEDIA RETENTION ────────────────────────────────
+
+   WHY THIS EXISTS. Every render wrote an MP4, an MP3 and a JPEG into
+   Supabase Storage and nothing ever deleted them. Over roughly three
+   weeks that reached 536 video files and about 2.3 GB against a 1 GB
+   free-tier limit, and the organisation was restricted — which stops
+   the ENTIRE pipeline, not just the site, because every stage of this
+   pipeline reads or writes Supabase.
+
+   Worse, Supabase restricts on the AVERAGE storage across the billing
+   period, not the current figure. So deleting everything on the last
+   day does not lift the restriction: three weeks of overage are already
+   in the mean. The only fixes at that point are paying or waiting for
+   the period to roll over. That is why this has to run continuously
+   rather than being something to remember when a warning appears.
+
+   WHAT GETS DELETED. The MP4 and the narration MP3, for any story older
+   than RETENTION_DAYS. Both are dead weight by then: the video is on
+   YouTube, the story has expired off the feed, and the narration was
+   only ever an input to the render — it is baked into the MP4 and
+   nothing reads the standalone file afterwards.
+
+   WHAT SURVIVES. Thumbnails. They are what render the cards on the
+   feed, they are two orders of magnitude smaller than the videos, and
+   deleting them would leave the site looking broken for no meaningful
+   saving.
+
+   THREE DAYS. Long enough that a story is well past its life on a news
+   feed, short enough that steady-state usage stays comfortably inside
+   1 GB. At roughly thirty renders a day and four to five megabytes per
+   video that is about 400 MB, with room for thumbnails and the database
+   on top.
+*/
+const RETENTION_DAYS = 3;
+
+// Per run. Storage deletes are network calls and this endpoint shares
+// Vercel's function limit with the NewsAPI fetches below, so the sweep
+// is deliberately capped rather than trying to clear a backlog in one
+// go. Ingest runs every four hours, so a backlog drains over a day or
+// two on its own.
+const CLEANUP_BATCH = 100;
+
+const STORAGE_BUCKET = "media";
 
 // Outlets that break stories rather than repackage them. Anything
 // unlisted scores 1 — unknown, not penalised.
@@ -139,6 +183,108 @@ function cleanDescription(raw) {
   // source material and produce a script built on a fragment.
   if (text.length < 30) return null;
   return text.slice(0, MAX_DESCRIPTION);
+}
+
+/* ─────────────────── STORAGE CLEANUP ─────────────────────────────── */
+
+/**
+ * Turns a Supabase public URL back into the object path the storage API
+ * expects.
+ *
+ *   https://<ref>.supabase.co/storage/v1/object/public/media/video/<id>.mp4
+ *                                                          ^^^^^^^^^^^^^^^^
+ *
+ * Split on the bucket segment rather than counting path parts, because
+ * the project ref and the domain can change and the bucket name cannot.
+ * Returns null for anything that doesn't look like one of our URLs —
+ * a null column, a hand-edited row, an external link — so a malformed
+ * value is skipped instead of producing a nonsense delete.
+ */
+function storagePathFromUrl(url) {
+  if (typeof url !== "string" || !url) return null;
+  const marker = "/" + STORAGE_BUCKET + "/";
+  const i = url.indexOf(marker);
+  if (i === -1) return null;
+  const path = url.slice(i + marker.length).split("?")[0].trim();
+  if (!path || path.includes("..")) return null;
+  return path;
+}
+
+/**
+ * Deletes the video and narration files for stories older than
+ * RETENTION_DAYS, then clears the columns that pointed at them.
+ *
+ * Order matters: files first, columns second. If this function dies
+ * between the two, the worst case is a row pointing at a file that no
+ * longer exists — the player fails on one card. Doing it the other way
+ * round would orphan the files permanently, since nothing would remember
+ * their paths, and orphaned files are exactly what caused the outage
+ * this was written to prevent.
+ *
+ * Never throws. A failed sweep must not stop the day's ingest — the
+ * storage problem is slow-moving and there will be another run in four
+ * hours, whereas a missed ingest is a gap in the feed.
+ */
+async function cleanupOldMedia(supabase) {
+  const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString();
+
+  const { data: rows, error } = await supabase
+    .from("published_stories")
+    .select("id, video_url, audio_url")
+    .lt("created_at", cutoff)
+    .not("video_url", "is", null)
+    .limit(CLEANUP_BATCH);
+
+  if (error) {
+    console.error("[ingest] cleanup lookup failed:", error.message);
+    return { checked: 0, deleted: 0 };
+  }
+  if (!rows || !rows.length) {
+    console.log("[ingest] cleanup: nothing older than", RETENTION_DAYS, "days");
+    return { checked: 0, deleted: 0 };
+  }
+
+  const paths = [];
+  for (const row of rows) {
+    const v = storagePathFromUrl(row.video_url);
+    const a = storagePathFromUrl(row.audio_url);
+    if (v) paths.push(v);
+    if (a) paths.push(a);
+  }
+
+  let deleted = 0;
+  if (paths.length) {
+    // `remove` is idempotent — a path that is already gone is not an
+    // error, which matters because this can run against rows whose
+    // files were cleared manually.
+    const { error: rmErr } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .remove(paths);
+
+    if (rmErr) {
+      console.error("[ingest] storage remove failed:", rmErr.message);
+      // Deliberately fall through to clearing the columns anyway. If the
+      // files are gone the columns are wrong either way, and leaving
+      // them set means the same rows are re-selected next run and the
+      // sweep never advances past a permanently broken batch.
+    } else {
+      deleted = paths.length;
+    }
+  }
+
+  const { error: clearErr } = await supabase
+    .from("published_stories")
+    .update({ video_url: null, audio_url: null })
+    .in("id", rows.map((r) => r.id));
+
+  if (clearErr) console.error("[ingest] cleanup column clear failed:", clearErr.message);
+
+  console.log(
+    "[ingest] cleanup: cleared", rows.length, "stories,",
+    deleted, "files removed (older than", RETENTION_DAYS, "days)"
+  );
+
+  return { checked: rows.length, deleted };
 }
 
 /**
@@ -245,7 +391,7 @@ function rankStories(articles, limit) {
 }
 
 export default async function handler(req, res) {
-  // Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. Without
+  // GitHub Actions sends `Authorization: Bearer <CRON_SECRET>`. Without
   // this check the URL is public and anyone could trigger a full render
   // cycle at will.
   const secret = process.env.CRON_SECRET;
@@ -295,6 +441,17 @@ export default async function handler(req, res) {
   } catch (e) {
     // Non-fatal: a failed cleanup shouldn't stop today's ingest.
     console.error("[ingest] expiry sweep failed:", e);
+  }
+
+  /* Media retention sweep. Runs BEFORE the NewsAPI fetches so that a
+     slow news API cannot eat the function's time budget and leave the
+     storage sweep permanently unreached — which is the failure mode
+     that lets a disk fill silently. Never throws; see cleanupOldMedia. */
+  try {
+    summary.cleanup = await cleanupOldMedia(supabase);
+  } catch (e) {
+    console.error("[ingest] cleanup sweep failed:", e);
+    summary.cleanup = { error: true };
   }
 
   try {
