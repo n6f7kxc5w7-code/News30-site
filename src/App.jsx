@@ -3212,11 +3212,6 @@ function useViewport() {
    the bell starts empty rather than showing sample stories. */
 const seedNotifications = () => [];
 
-function App() {
-  const vw = useViewport();
-  const mobile = vw < 768;
-  const canFull = vw >= 1100;
-function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
