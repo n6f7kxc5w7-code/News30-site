@@ -17,6 +17,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { Analytics } from '@vercel/analytics/react';
+import { useVisualViewport } from "./useVisualViewport";
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
@@ -3215,6 +3216,12 @@ function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
+function App() {
+  const vw = useViewport();
+  const mobile = vw < 768;
+  const canFull = vw >= 1100;
+  const { keyboardOffset } = useVisualViewport();
+
 
   useKeyboardInset();
 
