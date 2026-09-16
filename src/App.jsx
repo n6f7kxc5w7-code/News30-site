@@ -3211,7 +3211,7 @@ function useViewport() {
 /* 🔌 Real notifications will be pushed from the ingest worker; until then
    the bell starts empty rather than showing sample stories. */
 const seedNotifications = () => [];
-
+function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
@@ -3219,7 +3219,6 @@ const seedNotifications = () => [];
 
 
   useKeyboardInset();
-function App() {
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
   const [sbFull, setSbFull] = React.useState(true);   // desktop full vs mini
