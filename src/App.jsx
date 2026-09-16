@@ -3219,7 +3219,7 @@ const seedNotifications = () => [];
 
 
   useKeyboardInset();
-
+function App() {
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
   const [sbFull, setSbFull] = React.useState(true);   // desktop full vs mini
