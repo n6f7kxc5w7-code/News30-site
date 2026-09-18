@@ -85,13 +85,18 @@ const MAX_DESCRIPTION = 600;
    deleting them would leave the site looking broken for no meaningful
    saving.
 
-   THREE DAYS. Long enough that a story is well past its life on a news
-   feed, short enough that steady-state usage stays comfortably inside
-   1 GB. At roughly thirty renders a day and four to five megabytes per
-   video that is about 400 MB, with room for thumbnails and the database
-   on top.
+   ONE DAY. Started at three, which measured at a steady 1.03 GB — over
+   the free-tier limit, so the billing-period average would have started
+   the next cycle already in breach and tripped the restriction a second
+   time. One day cuts that to roughly a third, around 350 MB, which is
+   real headroom rather than sitting on the line.
+
+   A day is enough. ingest.js expires unrendered stories after 24 hours
+   anyway, so by the time a video is deleted the story is already off
+   the feed, and the video itself is on YouTube. Nothing reads these
+   files after the first day.
 */
-const RETENTION_DAYS = 3;
+const RETENTION_DAYS = 1;
 
 // Per run. Storage deletes are network calls and this endpoint shares
 // Vercel's function limit with the NewsAPI fetches below, so the sweep
