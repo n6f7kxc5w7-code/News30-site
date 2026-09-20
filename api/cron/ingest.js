@@ -98,13 +98,6 @@ const MAX_DESCRIPTION = 600;
 */
 const RETENTION_DAYS = 1;
 
-// Per run. Storage deletes are network calls and this endpoint shares
-// Vercel's function limit with the NewsAPI fetches below, so the sweep
-// is deliberately capped rather than trying to clear a backlog in one
-// go. Ingest runs every four hours, so a backlog drains over a day or
-// two on its own.
-const CLEANUP_BATCH = 100;
-
 const STORAGE_BUCKET = "media";
 
 // Outlets that break stories rather than repackage them. Anything
@@ -190,106 +183,137 @@ function cleanDescription(raw) {
   return text.slice(0, MAX_DESCRIPTION);
 }
 
-/* ─────────────────── STORAGE CLEANUP ─────────────────────────────── */
+/* ─────────────────── STORAGE CLEANUP ───────────────────────────────
+
+   WHY THIS WORKS FROM STORAGE, NOT FROM THE DATABASE.
+
+   The first version found files to delete by reading video_url and
+   audio_url off published_stories rows, then deleting whatever those
+   URLs pointed at. That is only as good as the pointers. On 16 Sep a
+   manual `update published_stories set video_url = null, audio_url = null`
+   wiped every pointer at once, and from then on the sweep reported
+   {"checked":0,"deleted":0} on every run while 68 videos (1 GB) and 492
+   narration files sat in the bucket with nothing referring to them.
+   Orphaned files are invisible to a database-driven sweep, forever.
+
+   So this asks Storage directly. Every object carries its own
+   created_at, which is the only fact the retention rule actually needs.
+   Nulled columns, deleted rows, a failed render that uploaded narration
+   but never published — none of it matters any more. If a file in
+   video/ or narration/ is older than RETENTION_DAYS, it goes.
+
+   thumb/ is deliberately excluded: thumbnails draw the feed cards, are
+   about 140 KB each, and deleting them would leave the site looking
+   broken for almost no saving.
+*/
+const CLEANUP_FOLDERS = ["video", "narration"];
+
+// Supabase list() returns at most this many objects per call.
+const LIST_PAGE = 1000;
+
+// remove() takes an array of paths; chunked so one oversized request
+// cannot fail the whole sweep.
+const REMOVE_CHUNK = 100;
 
 /**
- * Turns a Supabase public URL back into the object path the storage API
- * expects.
+ * Every object in `folder` older than `cutoffMs`, oldest first.
  *
- *   https://<ref>.supabase.co/storage/v1/object/public/media/video/<id>.mp4
- *                                                          ^^^^^^^^^^^^^^^^
- *
- * Split on the bucket segment rather than counting path parts, because
- * the project ref and the domain can change and the bucket name cannot.
- * Returns null for anything that doesn't look like one of our URLs —
- * a null column, a hand-edited row, an external link — so a malformed
- * value is skipped instead of producing a nonsense delete.
+ * Sorted ascending by created_at so the scan can stop at the first file
+ * newer than the cutoff — everything after it is newer too, and there is
+ * no point paging through today's renders.
  */
-function storagePathFromUrl(url) {
-  if (typeof url !== "string" || !url) return null;
-  const marker = "/" + STORAGE_BUCKET + "/";
-  const i = url.indexOf(marker);
-  if (i === -1) return null;
-  const path = url.slice(i + marker.length).split("?")[0].trim();
-  if (!path || path.includes("..")) return null;
-  return path;
+async function listExpired(supabase, folder, cutoffMs) {
+  const expired = [];
+  let offset = 0;
+
+  for (;;) {
+    const { data, error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .list(folder, {
+        limit: LIST_PAGE,
+        offset,
+        sortBy: { column: "created_at", order: "asc" },
+      });
+
+    if (error) throw new Error("list " + folder + " failed: " + error.message);
+    if (!data || !data.length) break;
+
+    let reachedNew = false;
+    for (const obj of data) {
+      // list() also returns sub-folder placeholders, which have no id and
+      // no created_at. Skip them rather than trying to delete a folder.
+      if (!obj || !obj.id || !obj.created_at) continue;
+      if (Date.parse(obj.created_at) >= cutoffMs) { reachedNew = true; break; }
+      expired.push(folder + "/" + obj.name);
+    }
+
+    if (reachedNew || data.length < LIST_PAGE) break;
+    offset += LIST_PAGE;
+  }
+
+  return expired;
 }
 
 /**
- * Deletes the video and narration files for stories older than
- * RETENTION_DAYS, then clears the columns that pointed at them.
+ * Deletes video and narration files older than RETENTION_DAYS, straight
+ * from Storage, then clears any database columns still pointing at them.
  *
- * Order matters: files first, columns second. If this function dies
- * between the two, the worst case is a row pointing at a file that no
- * longer exists — the player fails on one card. Doing it the other way
- * round would orphan the files permanently, since nothing would remember
- * their paths, and orphaned files are exactly what caused the outage
- * this was written to prevent.
+ * Files first, columns second: if this dies halfway, the worst outcome
+ * is a row pointing at a missing file (one card fails to play), never a
+ * file nobody can find.
  *
- * Never throws. A failed sweep must not stop the day's ingest — the
- * storage problem is slow-moving and there will be another run in four
- * hours, whereas a missed ingest is a gap in the feed.
+ * Never throws. A failed sweep must not stop the day's ingest — there is
+ * another run in four hours, whereas a missed ingest is a gap in the feed.
  */
 async function cleanupOldMedia(supabase) {
-  const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString();
+  const cutoffMs = Date.now() - RETENTION_DAYS * 86400000;
+  const result = { checked: 0, deleted: 0, failed: 0 };
 
-  const { data: rows, error } = await supabase
-    .from("published_stories")
-    .select("id, video_url, audio_url")
-    .lt("created_at", cutoff)
-    .not("video_url", "is", null)
-    .limit(CLEANUP_BATCH);
+  for (const folder of CLEANUP_FOLDERS) {
+    let paths;
+    try {
+      paths = await listExpired(supabase, folder, cutoffMs);
+    } catch (e) {
+      console.error("[ingest] cleanup:", String(e.message || e));
+      continue;
+    }
 
-  if (error) {
-    console.error("[ingest] cleanup lookup failed:", error.message);
-    return { checked: 0, deleted: 0 };
-  }
-  if (!rows || !rows.length) {
-    console.log("[ingest] cleanup: nothing older than", RETENTION_DAYS, "days");
-    return { checked: 0, deleted: 0 };
-  }
+    result.checked += paths.length;
 
-  const paths = [];
-  for (const row of rows) {
-    const v = storagePathFromUrl(row.video_url);
-    const a = storagePathFromUrl(row.audio_url);
-    if (v) paths.push(v);
-    if (a) paths.push(a);
-  }
-
-  let deleted = 0;
-  if (paths.length) {
-    // `remove` is idempotent — a path that is already gone is not an
-    // error, which matters because this can run against rows whose
-    // files were cleared manually.
-    const { error: rmErr } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .remove(paths);
-
-    if (rmErr) {
-      console.error("[ingest] storage remove failed:", rmErr.message);
-      // Deliberately fall through to clearing the columns anyway. If the
-      // files are gone the columns are wrong either way, and leaving
-      // them set means the same rows are re-selected next run and the
-      // sweep never advances past a permanently broken batch.
-    } else {
-      deleted = paths.length;
+    for (let i = 0; i < paths.length; i += REMOVE_CHUNK) {
+      const chunk = paths.slice(i, i + REMOVE_CHUNK);
+      const { data, error } = await supabase.storage.from(STORAGE_BUCKET).remove(chunk);
+      if (error) {
+        console.error("[ingest] cleanup remove failed in", folder + ":", error.message);
+        result.failed += chunk.length;
+      } else {
+        result.deleted += (data || chunk).length;
+      }
     }
   }
 
-  const { error: clearErr } = await supabase
-    .from("published_stories")
-    .update({ video_url: null, audio_url: null })
-    .in("id", rows.map((r) => r.id));
-
-  if (clearErr) console.error("[ingest] cleanup column clear failed:", clearErr.message);
+  /* Clear pointers to anything we just removed, so the site doesn't offer
+     a play button that 404s. Row age is used as the proxy: a story row is
+     created before its files, so any row older than the cutoff has files
+     older than the cutoff too. Harmless when there is nothing to clear. */
+  try {
+    const { error } = await supabase
+      .from("published_stories")
+      .update({ video_url: null, audio_url: null })
+      .lt("created_at", new Date(cutoffMs).toISOString())
+      .not("video_url", "is", null);
+    if (error) console.error("[ingest] cleanup column clear failed:", error.message);
+  } catch (e) {
+    console.error("[ingest] cleanup column clear errored:", String(e).slice(0, 160));
+  }
 
   console.log(
-    "[ingest] cleanup: cleared", rows.length, "stories,",
-    deleted, "files removed (older than", RETENTION_DAYS, "days)"
+    "[ingest] cleanup: found", result.checked, "expired files,",
+    result.deleted, "deleted,", result.failed, "failed",
+    "(older than", RETENTION_DAYS, "day" + (RETENTION_DAYS === 1 ? "" : "s") + ")"
   );
 
-  return { checked: rows.length, deleted };
+  return result;
 }
 
 /**
