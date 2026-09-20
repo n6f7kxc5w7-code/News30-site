@@ -96,7 +96,12 @@ const MAX_DESCRIPTION = 600;
    the feed, and the video itself is on YouTube. Nothing reads these
    files after the first day.
 */
-const RETENTION_DAYS = 1;
+/* TWELVE HOURS (0.5 days). One day measured at ~800 MB within 24h of a
+   full clear: at ~15 MB per video and 30-40 renders a day, a single day
+   of output alone nearly fills the 1 GB free tier. Half a day halves it.
+   By twelve hours the story has aged off the top of the feed and the
+   video is already on YouTube. */
+const RETENTION_DAYS = 0.5;
 
 const STORAGE_BUCKET = "media";
 
