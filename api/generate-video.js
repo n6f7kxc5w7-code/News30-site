@@ -139,6 +139,18 @@
 //    backslash would be parsed as an ASS override tag — silently
 //    dropping text at best, breaking the render at worst. Both the
 //    caption and card builders now run text through assEscape().
+//
+// 8. VIDEOS WERE ~15 MB EACH. `-preset ultrafast` with no rate control
+//    produced roughly 4 Mbps for a 720x1280 slideshow — measured at
+//    68 videos = 1039 MB. At 30-40 renders a day that is 500+ MB of new
+//    files daily, which alone nearly fills Supabase's 1 GB free tier and
+//    got the organisation restricted twice. Now `-crf 30` with a
+//    `-maxrate 1500k` ceiling: about 6 MB worst case, usually less, with
+//    no visible difference on a phone. `superfast` rather than
+//    `ultrafast` because ultrafast disables most of the tools that make
+//    rate control efficient; it is only marginally slower. If renders
+//    start timing out against the 60s limit, go back to `ultrafast` and
+//    keep -crf and -maxrate — they still do most of the work.
 // ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -1271,9 +1283,18 @@ export default async function handler(req, res) {
       "-filter_complex", filterComplex,
       "-map", "[" + finalLabel + "]",
       "-map", slidePaths.length + ":a",
-      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+      // Size-capped encode — see fix #8 in the header. -maxrate is the
+      // hard ceiling (~6 MB for 30s); -crf 30 lets simple scenes (static
+      // text cards, slow zooms) come in well under it.
+      "-c:v", "libx264", "-preset", "superfast", "-crf", "30",
+      "-maxrate", "1500k", "-bufsize", "3000k", "-pix_fmt", "yuv420p",
       "-r", String(FPS),
-      "-c:a", "aac",
+      // Narration is a single voice; 96k AAC is indistinguishable from
+      // the default and saves a little more per file.
+      "-c:a", "aac", "-b:a", "96k",
+      // Moves the index to the front so the site's <video> can start
+      // playing before the whole file has downloaded.
+      "-movflags", "+faststart",
       "-shortest",
       "-y", outputPath
     );
