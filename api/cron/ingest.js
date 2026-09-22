@@ -58,50 +58,59 @@ const HEADLINES_TO_CONSIDER = 40; // pool per category before ranking
    to ignore. 600 characters comfortably holds a full summary. */
 const MAX_DESCRIPTION = 600;
 
-/* ─────────────────── MEDIA RETENTION ────────────────────────────────
+/* ─── THE STORAGE BUDGET ────────────────────────────────────────────
 
-   WHY THIS EXISTS. Every render wrote an MP4, an MP3 and a JPEG into
-   Supabase Storage and nothing ever deleted them. Over roughly three
-   weeks that reached 536 video files and about 2.3 GB against a 1 GB
-   free-tier limit, and the organisation was restricted — which stops
-   the ENTIRE pipeline, not just the site, because every stage of this
-   pipeline reads or writes Supabase.
+   Retention is not a taste question, it is arithmetic. The free tier is
+   1024 MB and the whole pipeline stops when it is exceeded, so:
 
-   Worse, Supabase restricts on the AVERAGE storage across the billing
-   period, not the current figure. So deleting everything on the last
-   day does not lift the restriction: three weeks of overage are already
-   in the mean. The only fixes at that point are paying or waiting for
-   the period to roll over. That is why this has to run continuously
-   rather than being something to remember when a warning appears.
+     1024 MB limit
+     - 100 MB deliberate safety margin
+     =  924 MB usable
 
-   WHAT GETS DELETED. The MP4 and the narration MP3, for any story older
-   than RETENTION_DAYS. Both are dead weight by then: the video is on
-   YouTube, the story has expired off the feed, and the narration was
-   only ever an input to the render — it is baked into the MP4 and
-   nothing reads the standalone file afterwards.
+   Three things live in the bucket, and they behave differently.
 
-   WHAT SURVIVES. Thumbnails. They are what render the cards on the
-   feed, they are two orders of magnitude smaller than the videos, and
-   deleting them would leave the site looking broken for no meaningful
-   saving.
+   THUMBNAILS are what draw the cards on the feed, so a story without
+   one looks broken even when it has no video left. At ~0.14 MB each (847 files,
+   118 MB measured) that is only ~10 MB a day — but nothing was ever
+   deleting them, so over a few months they would quietly eat the whole
+   budget on their own. They get their own, much longer retention: at 30
+   days they settle at roughly 150 MB and stop growing.
 
-   ONE DAY. Started at three, which measured at a steady 1.03 GB — over
-   the free-tier limit, so the billing-period average would have started
-   the next cycle already in breach and tripped the restriction a second
-   time. One day cuts that to roughly a third, around 350 MB, which is
-   real headroom rather than sitting on the line.
+     924 MB usable
+     - 150 MB thumbnails at 30 days
+     =  774 MB for video + narration
 
-   A day is enough. ingest.js expires unrendered stories after 24 hours
-   anyway, so by the time a video is deleted the story is already off
-   the feed, and the video itself is on YouTube. Nothing reads these
-   files after the first day.
+   VIDEO + NARRATION. Measured 22 Sep, after the encoder was rate-capped:
+   video averaged 1.35 MB and narration 0.29 MB per render, against
+   ~15 MB per video before. That was -crf 30, which came in at roughly
+   360 kbps — far under its own 1500k ceiling, so the quality knob, not
+   the cap, was doing the work. -crf 25 spends some of that headroom
+   back on picture quality at an expected ~3 MB per video.
+
+   Render rate is the least certain input: 34 videos were present under
+   a 12-hour retention, implying ~68 renders a day, which is double what
+   the schedule suggests. Using the higher figure deliberately.
+
+     68 renders/day x (3 MB video + 0.29 MB narration) = ~225 MB/day
+     774 MB / 225 MB per day = 3.4 days
+
+   So three days, rounded down. Peak usage lands around 825 MB, which
+   preserves the 100 MB margin, and the site keeps three days of
+   playable video instead of the twelve hours that made every card older
+   than half a day show as a placeholder.
+
+   IF ANY INPUT CHANGES, REDO THE SUM. More renders per day, bigger
+   files, or a different encoder setting all move it. The query to check
+   the real numbers:
+
+     select split_part(name,'/',1) as folder, count(*) as files,
+            round(avg((metadata->>'size')::bigint)/1048576.0, 2) as avg_mb,
+            round(sum((metadata->>'size')::bigint)/1048576.0, 1) as total_mb
+     from storage.objects where bucket_id = 'media'
+     group by 1 order by 4 desc;
 */
-/* TWELVE HOURS (0.5 days). One day measured at ~800 MB within 24h of a
-   full clear: at ~15 MB per video and 30-40 renders a day, a single day
-   of output alone nearly fills the 1 GB free tier. Half a day halves it.
-   By twelve hours the story has aged off the top of the feed and the
-   video is already on YouTube. */
-const RETENTION_DAYS = 0.5;
+const RETENTION_DAYS = 3;          // video + narration
+const THUMB_RETENTION_DAYS = 30;   // thumbnails — see above
 
 const STORAGE_BUCKET = "media";
 
@@ -207,11 +216,15 @@ function cleanDescription(raw) {
    but never published — none of it matters any more. If a file in
    video/ or narration/ is older than RETENTION_DAYS, it goes.
 
-   thumb/ is deliberately excluded: thumbnails draw the feed cards, are
-   about 140 KB each, and deleting them would leave the site looking
-   broken for almost no saving.
+   thumb/ is swept too, but on THUMB_RETENTION_DAYS rather than
+   RETENTION_DAYS: a thumbnail is ~40x smaller than its video and it is
+   what keeps a card from looking broken after the video is gone.
 */
-const CLEANUP_FOLDERS = ["video", "narration"];
+const CLEANUP_FOLDERS = [
+  { folder: "video", days: RETENTION_DAYS },
+  { folder: "narration", days: RETENTION_DAYS },
+  { folder: "thumb", days: THUMB_RETENTION_DAYS },
+];
 
 // Supabase list() returns at most this many objects per call.
 const LIST_PAGE = 1000;
@@ -271,10 +284,11 @@ async function listExpired(supabase, folder, cutoffMs) {
  * another run in four hours, whereas a missed ingest is a gap in the feed.
  */
 async function cleanupOldMedia(supabase) {
-  const cutoffMs = Date.now() - RETENTION_DAYS * 86400000;
+  const mediaCutoffMs = Date.now() - RETENTION_DAYS * 86400000;
   const result = { checked: 0, deleted: 0, failed: 0 };
 
-  for (const folder of CLEANUP_FOLDERS) {
+  for (const { folder, days } of CLEANUP_FOLDERS) {
+    const cutoffMs = Date.now() - days * 86400000;
     let paths;
     try {
       paths = await listExpired(supabase, folder, cutoffMs);
@@ -305,7 +319,7 @@ async function cleanupOldMedia(supabase) {
     const { error } = await supabase
       .from("published_stories")
       .update({ video_url: null, audio_url: null })
-      .lt("created_at", new Date(cutoffMs).toISOString())
+      .lt("created_at", new Date(mediaCutoffMs).toISOString())
       .not("video_url", "is", null);
     if (error) console.error("[ingest] cleanup column clear failed:", error.message);
   } catch (e) {
@@ -315,7 +329,7 @@ async function cleanupOldMedia(supabase) {
   console.log(
     "[ingest] cleanup: found", result.checked, "expired files,",
     result.deleted, "deleted,", result.failed, "failed",
-    "(older than", RETENTION_DAYS, "day" + (RETENTION_DAYS === 1 ? "" : "s") + ")"
+    "(video/narration >", RETENTION_DAYS, "days; thumbs >", THUMB_RETENTION_DAYS, "days)"
   );
 
   return result;
