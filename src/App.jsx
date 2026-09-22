@@ -3544,11 +3544,7 @@ function App() {
 
       <Toasts items={toasts} />
       <Analytics />
-       <div style={{position:'fixed',top:0,left:0,zIndex:99999,
-           background:'#f00',color:'#fff',font:'12px monospace',padding:'2px 6px'}}>
-           kb {keyboardOffset} · ih {window.innerHeight} · vv {Math.round(window.visualViewport?.height||0)} · top {Math.round(window.visualViewport?.offsetTop||0)}
-      </div>
-
+       
     </React.Fragment>
   );
 }
