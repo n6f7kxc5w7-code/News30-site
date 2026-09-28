@@ -3184,7 +3184,7 @@ function useKeyboardInset() {
     const vv = window.visualViewport;
     if (!vv) return;
     const sync = () => {
-      const hidden = Math.max(0, window.innerHeight - vv.height * vv.scale);
+      const hidden = 0;
        
       document.documentElement.style.setProperty("--kb", hidden + "px");
     };
