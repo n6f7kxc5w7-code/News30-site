@@ -1351,7 +1351,7 @@ const CSS2 = `
 .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
 .ask-in{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid #303030;border-radius:999px;padding:4px 4px 4px 15px}
 .ask-in:focus-within{border-color:var(--blue-d)}
-.ask-in input{flex:1;font-size:13.5px;height:34px;min-width:0}
+.ask-in input{flex:1;font-size:13.16px;height:34px;min-width:0}
 .send{width:36px;height:36px;border-radius:50%;background:var(--blue);color:#04182b;display:flex;align-items:center;justify-content:center;flex:none;transition:opacity .15s,transform .1s}
 .send:active{transform:scale(.94)}
 .send:disabled{opacity:.35;cursor:default}
@@ -3184,8 +3184,8 @@ function useKeyboardInset() {
     const vv = window.visualViewport;
     if (!vv) return;
     const sync = () => {
-      const hidden = Math.max(0, window.innerHeight - vv.height);
-
+      const hidden = Math.max(0, window.innerHeight - vv.height * vv.scale);
+       
       document.documentElement.style.setProperty("--kb", hidden + "px");
     };
     vv.addEventListener("resize", sync);
