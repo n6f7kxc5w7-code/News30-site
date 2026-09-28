@@ -3187,7 +3187,9 @@ function useKeyboardInset() {
     const sync = () => {
       const hidden = Math.max(0, window.innerHeight - vv.height * vv.scale - vv.offsetTop);
        
-      document.documentElement.style.setProperty("--kb", hidden + "px");
+         document.documentElement.style.setProperty("--kb", hidden + "px");
+         document.documentElement.style.setProperty("--vvh", (vv.height * vv.scale) + "px");
+
     };
     vv.addEventListener("resize", sync);
     vv.addEventListener("scroll", sync);
