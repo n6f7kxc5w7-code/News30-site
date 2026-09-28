@@ -1155,7 +1155,7 @@ const CSS1 = `
 }
 html,body,#root{height:100%}
 body{background:var(--bg);color:var(--txt);font-family:var(--font);font-size:14px;overflow-x:hidden}
-body.no-scroll{overflow:hidden}
+body.no-scroll{overflow:hidden;position:fixed;left:0;right:0;width:100%}
 button{font-family:var(--font);border:0;background:none;color:inherit;cursor:pointer}
 input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0;outline:none}
 @media(max-width:767px){input,textarea{font-size:16px!important}}
@@ -3185,7 +3185,7 @@ function useKeyboardInset() {
     const vv = window.visualViewport;
     if (!vv) return;
     const sync = () => {
-      const hidden = 0;
+      const hidden = Math.max(0, window.innerHeight - vv.height * vv.scale - vv.offsetTop);
        
       document.documentElement.style.setProperty("--kb", hidden + "px");
     };
@@ -3335,10 +3335,20 @@ function App() {
     }
   }, []);
 
-  /* lock body scroll while the player is open */
+/* lock body scroll while the player is open. overflow:hidden alone does
+not stop iOS Safari scrolling the page to reveal a focused input, so
+the body is pinned with position:fixed and the feed's scroll position
+is restored when the player closes. */
   React.useEffect(() => {
-    document.body.classList.toggle("no-scroll", !!player);
-    return () => document.body.classList.remove("no-scroll");
+    if (!player) return;
+    const y = window.scrollY;
+    document.body.style.top = -y + "px";
+    document.body.classList.add("no-scroll");
+    return () => {
+      document.body.classList.remove("no-scroll");
+      document.body.style.top = "";
+      window.scrollTo(0, y);
+    };
   }, [player]);
 
   const unread = notifs.filter((n) => !n.read).length;
