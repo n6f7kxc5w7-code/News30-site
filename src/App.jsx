@@ -1158,6 +1158,7 @@ body{background:var(--bg);color:var(--txt);font-family:var(--font);font-size:14p
 body.no-scroll{overflow:hidden}
 button{font-family:var(--font);border:0;background:none;color:inherit;cursor:pointer}
 input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0;outline:none}
+@media(max-width:767px){input,textarea{font-size:16px}}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:#3f3f3f;border-radius:4px}
 ::-webkit-scrollbar-track{background:transparent}
