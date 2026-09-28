@@ -1476,7 +1476,7 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-   .pnl{top:auto;left:0;right:0;bottom:var(--kb,0px);height:min(68%,calc(100% - var(--kb,0px) - 24px));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease;transition:bottom .18s ease,height .18s ease}
+   .pnl{top:auto;left:0;right:0;bottom:var(--kb,0px);height:min(68%,calc(var(--vvh,100%) - 24px));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
