@@ -163,6 +163,12 @@
 //    rate control efficient; it is only marginally slower. If renders
 //    start timing out against the 60s limit, go back to `ultrafast` and
 //    keep -crf and -maxrate — they still do most of the work.
+//
+// 9. THIS FUNCTION NOW PUBLISHES THE STORY. Previously process.js copied
+//    the finished video onto published_stories after this returned —
+//    but it was routinely killed at Vercel's 60s limit while waiting, so
+//    finished videos never reached the site and the story re-rendered in
+//    a loop. See the publish block after the upload for the full story.
 // ─────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -1381,6 +1387,53 @@ export default async function handler(req, res) {
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
+
+    /* ── Publish the story HERE, not in process.js ──────────────────
+
+       This used to be process.js's job: it called this endpoint, waited
+       for the response, then copied video_url onto published_stories.
+       But a render uses most of Vercel's 60-second budget, so process.js
+       was regularly killed while still waiting. The video was finished
+       and uploaded, but the story never learned about it — it sat at
+       `generating`, the stale-claim sweep reset it to `pending` ten
+       minutes later, and the whole thing rendered AGAIN, burning storage
+       and dying at the same point. That loop is why the site kept going
+       empty and needed hand-run SQL to repair.
+
+       This function is the one still alive at this moment and the only
+       one that knows the render succeeded, so it publishes. process.js
+       still writes the same values if it happens to survive — that is
+       harmless, it just stops being load-bearing.
+
+       Never fatal: the video is already safe in storage and on the job
+       row, and a failure here is recoverable with the repair query. */
+    if (job.story_id) {
+      try {
+        const { error: pubErr } = await supabase
+          .from("published_stories")
+          .update({
+            status: "ready",
+            video_url: videoUrl,
+            thumbnail_url: thumbnailUrl,
+            audio_url: job.audio_url || null,
+            script: job.script || null,
+            image_queries: job.image_queries || null,
+            quiz: (Array.isArray(job.quiz) && job.quiz.length) ? job.quiz : null,
+            script_prompt_version: job.script_prompt_version || null,
+            duration_seconds: Number(realDuration.toFixed(2)),
+            error: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.story_id);
+        if (pubErr) {
+          console.error("[generate-video] publish to story failed:", pubErr.message);
+        } else {
+          console.log("[generate-video] published story", job.story_id);
+        }
+      } catch (e) {
+        console.error("[generate-video] publish to story errored:", String(e).slice(0, 160));
+      }
+    }
 
     // Written only after the video is safely uploaded — recording a
     // photo as used when the render then failed would burn it out of
