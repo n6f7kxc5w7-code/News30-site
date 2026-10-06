@@ -45,6 +45,11 @@ import { createClient } from "@supabase/supabase-js";
 // you also want to spend quota on anything else that day.
 const MAX_PER_RUN = 3;
 
+// Only upload news that is still news. The pipeline renders far more
+// stories a day than the quota can upload, so the old oldest-first
+// queue meant every draft was already 2–3 days stale.
+const MAX_AGE_HOURS = 36;
+
 // YouTube truncates hard at 100 characters and rejects < > outright.
 const TITLE_LIMIT = 100;
 
@@ -206,16 +211,21 @@ async function uploadOne(story, accessToken) {
 }
 
 async function main() {
-  // `youtube_id is null` is what makes this idempotent. The workflow can
-  // run every four hours, or twice by accident, and nothing gets
-  // double-posted — a story with an ID is simply not selected again.
+  // Newest first, and never a story that already failed once. Before,
+  // the queue was oldest-first and retried failures forever, so one
+  // broken story (e.g. its file already deleted by storage cleanup) sat
+  // at the front and blocked every upload behind it — while the run
+  // still showed a green tick. `youtube_id is null` keeps it idempotent.
+  const since = new Date(Date.now() - MAX_AGE_HOURS * 3600 * 1000).toISOString();
   const { data: stories, error } = await supabase
     .from("published_stories")
     .select("id, headline, script, category, source, article_url, video_url")
     .eq("status", "ready")
     .is("youtube_id", null)
+    .is("youtube_error", null)
     .not("video_url", "is", null)
-    .order("created_at", { ascending: true })
+    .gte("updated_at", since)
+    .order("updated_at", { ascending: false })
     .limit(MAX_PER_RUN);
 
   if (error) {
@@ -224,7 +234,17 @@ async function main() {
   }
 
   if (!stories || !stories.length) {
-    console.log("[upload] nothing to upload");
+    // Say WHY it's empty, so an empty run is never a mystery again.
+    const { count } = await supabase
+      .from("published_stories")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "ready")
+      .gte("updated_at", since);
+    console.log(
+      "[upload] nothing to upload —", count ?? "?", "stories went ready in the last",
+      MAX_AGE_HOURS + "h (all already uploaded or failed). If that number is 0, " +
+      "the render pipeline is the problem, not this script."
+    );
     return;
   }
 
@@ -232,6 +252,7 @@ async function main() {
   const accessToken = await getAccessToken();
 
   let uploaded = 0;
+  let failed = 0;
   for (const story of stories) {
     console.log("[upload] →", (story.headline || "").slice(0, 70));
     try {
@@ -258,6 +279,7 @@ async function main() {
         break;
       }
 
+      failed++;
       console.error("[upload] ❌ failed:", message);
       // Recorded but youtube_id stays null, so the next run picks it up
       // again. A genuinely broken video will keep reappearing, which is
@@ -269,7 +291,10 @@ async function main() {
     }
   }
 
-  console.log("[upload] done —", uploaded, "uploaded");
+  console.log("[upload] done —", uploaded, "uploaded,", failed, "failed");
+  // Every story failed → turn the run RED so GitHub emails you, instead
+  // of a green tick hiding a dead pipeline for days.
+  if (failed && !uploaded) process.exit(1);
   if (uploaded) {
     console.log("[upload] review them at https://studio.youtube.com → Content → filter by Private");
   }
