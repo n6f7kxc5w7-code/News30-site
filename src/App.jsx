@@ -2627,6 +2627,9 @@ function getQuiz(story) {
      only asks about outlet, category and tagline — answerable off the
      card without watching, which is worse than no quiz. */
   if (story.quiz && story.quiz.length) return story.quiz;
+  // Real pipeline stories never get the generic fallback: those
+  // questions can be answered off the card without watching.
+  if (String(story.id).startsWith("pub-")) return null;
   if (CURATED_QUIZ[story.id]) return CURATED_QUIZ[story.id];
 
   const rnd = seeded(story.seed + 5);
@@ -3061,6 +3064,16 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   }, [next, prev, panel, onClose]);
 
   const liked = userData.engagement.likedIds.includes(story.id);
+  /* Quiz is locked until the video is watched — the same 90% point
+     that dispatches VIDEO_WATCHED. */
+  const quiz = React.useMemo(() => getQuiz(story), [story.id]);
+  const quizUnlocked = userData.engagement.watchedIds.includes(story.id);
+  const openQuiz = () => {
+    if (panel === "quiz") { setPanel(null); return; }
+    if (!quiz) { toast("No quiz for this one yet", "bolt"); return; }
+    if (!quizUnlocked) { toast("Watch the video to unlock the quiz", "lock"); return; }
+    setPanel("quiz");
+  };
   const doLike = () => {
     if (!liked) setHeartKey((k) => k + 1);
     dispatch({ type: "LIKE_TOGGLED", storyId: story.id }); // 🔌 engagement event
@@ -3173,11 +3186,13 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
             Summary
           </div>
           <div className="rail-btn">
-            <button className="ibtn" onClick={() => setPanel(panel === "quiz" ? null : "quiz")}
-              style={panel === "quiz" ? { background: "var(--hover)" } : null} aria-label="Quiz">
-              <Icon name="bolt" size={23} />
+            <button className="ibtn" onClick={openQuiz}
+              style={panel === "quiz" ? { background: "var(--hover)" } : (!quiz || !quizUnlocked) ? { opacity: 0.6 } : null}
+              aria-label={!quiz ? "No quiz for this one yet" : !quizUnlocked ? "Watch the video to unlock the quiz" : "Quiz"}
+              title={!quiz ? "No quiz for this one yet" : !quizUnlocked ? "Watch the video to unlock the quiz" : "Quiz"}>
+              <Icon name={quiz && !quizUnlocked ? "lock" : "bolt"} size={23} />
             </button>
-            Quiz
+            {!quiz ? "No quiz" : !quizUnlocked ? "Locked" : "Quiz"}
           </div>
           <div className="rail-btn">
             <button className="ibtn" onClick={doShare} aria-label="Share">
@@ -3198,7 +3213,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
       </div>
 
       {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} />}
-      {panel === "quiz" && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
+      {panel === "quiz" && quiz && quizUnlocked && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
     </div>
   );
 }

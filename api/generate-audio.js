@@ -80,7 +80,8 @@ const MAX_TOKENS = 1400;
 // the A/B is unrecoverable.
 //   v2 — hook rules added
 //   v3 — NewsAPI description passed in as source material
-const SCRIPT_PROMPT_VERSION = 3;
+//   v4 — quiz must hinge on narration-only details
+const SCRIPT_PROMPT_VERSION = 4;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -183,7 +184,10 @@ actually took in the script you just wrote. Rules:
 - Every question must be answerable from the script alone. Do not ask
   about anything the script does not state.
 - Ask about substance: what happened, to whom, what figure was given,
-  what happens next. NEVER ask which outlet reported it, what category
+  what happens next.
+- No question may be answerable from the headline alone — each must
+  hinge on a detail only said in the narration (a number, a name, a
+  reason, what happens next). NEVER ask which outlet reported it, what category
   it belongs to, or what the headline was — those test the interface,
   not the news, and can be answered without watching.
 - Exactly 4 options each. All four must be plausible to someone who
@@ -218,7 +222,23 @@ of him is more use than a photo of a stadium:
 Example — a thin story where the source material runs out. Headline:
 "Kanter Freedom is not WNBA-eligible" with no usable Summary. The
 correct response is a SHORT script, not padding:
-{"script":"Enes Kanter Freedom is not WNBA-eligible. The former NBA centre will not play in the league, and the question of an arena ban remains undecided.","imageQueries":["empty basketball arena","basketball hoop closeup","sports press conference"],"entities":["Enes Kanter Freedom","WNBA"],"quiz":[{"q":"What has been ruled about Kanter Freedom?","opts":["He is not WNBA-eligible","He has been signed","He is retiring","He has been fined"],"correct":0},{"q":"What was his previous league?","opts":["The NBA","The EuroLeague","The G League","The NCAA"],"correct":0},{"q":"What remains undecided?","opts":["An arena ban","His salary","His retirement date","A trade"],"correct":0}]}`;
+{"script":"Enes Kanter Freedom is not WNBA-eligible. The former NBA centre will not play in the league, and the question of an arena ban remains undecided.","imageQueries":["empty basketball arena","basketball hoop closeup","sports press conference"],"entities":["Enes Kanter Freedom","WNBA"],"quiz":[{"q":"Which league did he previously play in?","opts":["The EuroLeague","The NBA","The G League","The NCAA"],"correct":1},{"q":"What position did he play?","opts":["Point guard","Shooting guard","Small forward","Centre"],"correct":3},{"q":"What remains undecided?","opts":["His salary","His retirement date","An arena ban","A trade"],"correct":2}]}`;
+
+/* Models put the right answer at index 0 far too often. Shuffle the four
+   options (Fisher-Yates) and move `correct` to wherever the right one
+   landed, so position gives nothing away. */
+function shuffleOptions(item) {
+  const order = [0, 1, 2, 3];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return {
+    q: item.q,
+    opts: order.map((k) => item.opts[k]),
+    correct: order.indexOf(item.correct),
+  };
+}
 
 // DeepSeek's JSON mode (response_format) makes malformed output less
 // likely than plain prompting, but still parse defensively — a failure
@@ -263,7 +283,7 @@ function parseScriptResponse(raw) {
           item.opts.every((o) => typeof o === "string" && o.trim()) &&
           Number.isInteger(item.correct) && item.correct >= 0 && item.correct < 4
         )
-        .map((item) => ({
+        .map((item) => shuffleOptions({
           q: item.q.trim(),
           opts: item.opts.map((o) => o.trim()),
           correct: item.correct,
