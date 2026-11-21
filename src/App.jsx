@@ -17,7 +17,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { Analytics } from '@vercel/analytics/react';
-import { useVisualViewport } from "./useVisualViewport";
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
@@ -1483,8 +1482,12 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  .pnl{top:auto;left:0;right:0;bottom:var(--kb,0px);height:min(68%,calc(var(--vvh,100%) - 24px));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
-  .pnl:focus-within{height:var(--vvh,100%);border-radius:0}
+  /* Pinned to the VISUAL viewport (see useKeyboardInset): top/height come
+     from visualViewport.offsetTop/height, so whatever iOS does with the
+     keyboard or its scroll-into-view, the panel's bottom edge is the top
+     of the keyboard. No bottom offset — that double-counted offsetTop. */
+  .pnl{position:fixed;left:0;right:0;bottom:auto;--pnl-h:min(calc(var(--vvh,100dvh) * .68),calc(var(--vvh,100dvh) - 24px));top:calc(var(--vvt,0px) + var(--vvh,100dvh) - var(--pnl-h));height:var(--pnl-h);width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
+  .pnl:focus-within{--pnl-h:var(--vvh,100dvh);border-radius:0}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -3220,20 +3223,20 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 
 /* ═══════════════════ 13 · APP ROOT — state + wiring ════════════════ */
 
-/* iOS Safari doesn't resize the layout viewport when the keyboard opens,
-   so a position:fixed panel stays put and its input ends up behind the
-   keys. visualViewport reports the real visible area — the difference is
-   the keyboard height, published as --kb for the CSS to sit above. */
+/* iOS Safari doesn't resize the layout viewport when the keyboard opens;
+   it shrinks the visual viewport and scrolls it (offsetTop) to reveal the
+   focused field. The mobile panel is pinned straight to that visible
+   rectangle: --vvt = visualViewport.offsetTop, --vvh = visualViewport.height.
+   Written synchronously on every resize/scroll so the panel never lags a
+   frame behind Safari's own scroll-into-view while typing. */
 function useKeyboardInset() {
   React.useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
+    const root = document.documentElement.style;
     const sync = () => {
-      const hidden = Math.max(0, window.innerHeight - vv.height * vv.scale - vv.offsetTop);
-       
-         document.documentElement.style.setProperty("--kb", hidden + "px");
-         document.documentElement.style.setProperty("--vvh", (vv.height * vv.scale) + "px");
-
+      root.setProperty("--vvt", vv.offsetTop + "px");
+      root.setProperty("--vvh", vv.height + "px");
     };
     vv.addEventListener("resize", sync);
     vv.addEventListener("scroll", sync);
@@ -3241,7 +3244,8 @@ function useKeyboardInset() {
     return () => {
       vv.removeEventListener("resize", sync);
       vv.removeEventListener("scroll", sync);
-      document.documentElement.style.removeProperty("--kb");
+      root.removeProperty("--vvt");
+      root.removeProperty("--vvh");
     };
   }, []);
 }
@@ -3263,9 +3267,6 @@ function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
-  const { keyboardOffset } = useVisualViewport();
-
-
   useKeyboardInset();
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
