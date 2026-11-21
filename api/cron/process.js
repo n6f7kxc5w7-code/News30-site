@@ -108,20 +108,23 @@ export default async function handler(req, res) {
     // render can outlast that, so overlapping invocations are now
     // NORMAL rather than exceptional: whichever writes second finds the
     // row already claimed and picks up the next one instead.
-    await supabase
-      .from("published_stories")
-      .update({
-        status: "generating",
-        attempts: story.attempts + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", story.id);
-
     console.log("[process] starting:", story.category, "—", story.headline.slice(0, 70));
 
     let jobId = null;
 
     try {
+      // Inside the try so a failed claim is written to the error column
+      // by the catch below, instead of rendering an unclaimed row.
+      const { error: claimErr } = await supabase
+        .from("published_stories")
+        .update({
+          status: "generating",
+          attempts: story.attempts + 1,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", story.id);
+      if (claimErr) throw new Error("claim update failed: " + claimErr.message);
+
       // ── Script + narration ──────────────────────────────────────
       // Passing headline and category (not a script) is what triggers
       // the DeepSeek path, which returns the script, the stock-photo
@@ -207,7 +210,7 @@ export default async function handler(req, res) {
       // prompt wrote them when comparing retention later. Without it,
       // two weeks of output is indistinguishable and the comparison is
       // unrecoverable.
-      await supabase
+      const { error: publishErr } = await supabase
         .from("published_stories")
         .update({
           status: "ready",
@@ -223,6 +226,9 @@ export default async function handler(req, res) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", story.id);
+      // Without this check a failed publish left the row stuck at
+      // "generating" with no error recorded.
+      if (publishErr) throw new Error("publish update failed: " + publishErr.message);
 
       /* Word count and resulting duration, logged together. This is the
          pair to watch: if scripts are long but videos are still short,
