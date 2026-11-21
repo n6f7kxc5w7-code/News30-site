@@ -1482,19 +1482,24 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  /* iMessage-style keyboard: the panel is pinned to the VISUAL viewport
-     (see useKeyboardInset). Its top sits at the normal 32% line plus
-     visualViewport.offsetTop, so it never moves on screen; its bottom is the
-     bottom of the visual viewport, i.e. the top of the keyboard. Only the
-     height changes: the input bar rides on the keyboard and .pnl-body
-     shrinks and scrolls. % here is of the layout viewport, which iOS does
-     not resize for the keyboard. */
-  .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + max(32%,24px));height:calc(var(--vvh,100%) - max(32%,24px));min-height:112px;width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
-  /* If Safari still scrolls the visual viewport (offsetTop > 0), move the
-     header and the video down by the same amount so nothing above the
-     panel visibly jumps. Only while the player has the body locked. */
+  /* YouTube-style sheet. --sheet-top is the line between video and sheet:
+     header + a 16:9 box, capped so the sheet keeps room. The video shrinks
+     into that box (letterboxed, still playing, tap to pause) and the sheet
+     fills the rest. Everything is offset by visualViewport.offsetTop
+     (--vvt) so that if iOS pans the visual viewport to reveal the focused
+     input, nothing visibly moves. */
+  .player{--sheet-top:min(calc(var(--hd-h) + 56.25vw),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
   body.no-scroll .hd{transform:translateY(var(--vvt,0px))}
-  .player{top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
+  .player.panel-open{align-items:flex-start}
+  .player.panel-open .pl-stage{height:calc(var(--sheet-top) - var(--hd-h))}
+  .player.panel-open .pl-vid{object-fit:contain}
+  .player.panel-open .pl-rail,.player.panel-open .pl-info,.player.panel-open .pl-grad,.player.panel-open .pl-topline{display:none}
+  .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + var(--sheet-top));height:calc(100% - var(--sheet-top));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
+  /* Keyboard: the sheet stays exactly as is; only the input bar rides on
+     top of the keyboard — its bottom is the bottom of the visual viewport —
+     overlaying the bottom of the summary. With the keyboard down that is
+     the sheet's own bottom edge, so focusing/blurring doesn't jump. */
+  .pnl-foot:focus-within{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -2663,6 +2668,18 @@ function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
      keeps focus from moving; the click that follows is swallowed so it
      can't land on the video behind the now-closed panel. Mouse is
      unchanged and still closes via onClick. */
+  /* While typing, a tap anywhere outside the input bar lowers the
+     keyboard (iOS doesn't reliably blur on taps on non-focusable areas). */
+  React.useEffect(() => {
+    const onDown = (e) => {
+      const a = document.activeElement;
+      if (!a || !a.closest || !a.closest(".pnl-foot")) return;
+      if (e.target.closest && e.target.closest(".pnl-foot")) return;
+      a.blur();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, []);
   const closeOnTouch = (e) => {
     if (e.pointerType === "mouse") return;
     e.preventDefault();
