@@ -1330,6 +1330,9 @@ const CSS2 = `
 .pnl-h h3{font-size:16px;font-weight:600;flex:1;display:flex;align-items:center;gap:9px}
 .pnl-h .ibtn{width:38px;height:38px}
 .pnl-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.pnl-chips{display:none;gap:8px;overflow-x:auto;padding:8px 0;margin:0 -12px;padding-left:12px;padding-right:12px;scrollbar-width:none}
+.pnl-chips::-webkit-scrollbar{display:none}
+.pnl-chips button{flex:none;border:0;border-radius:999px;background:var(--raised,#303030);color:inherit;font:inherit;font-size:14px;padding:8px 14px;white-space:nowrap;cursor:pointer}
 .pnl-foot{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:#212121}
 .tune{position:absolute;top:50px;right:54px;background:#2c2c2c;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;z-index:5;animation:pop .14s;width:190px}
 .tune button{display:flex;width:100%;padding:9px 15px;font-size:13.5px;gap:10px;align-items:center;text-align:left}
@@ -1482,24 +1485,30 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  /* YouTube-style sheet. --sheet-top is the line between video and sheet:
-     header + a 16:9 box, capped so the sheet keeps room. The video shrinks
-     into that box (letterboxed, still playing, tap to pause) and the sheet
-     fills the rest. Everything is offset by visualViewport.offsetTop
-     (--vvt) so that if iOS pans the visual viewport to reveal the focused
-     input, nothing visibly moves. */
-  .player{--sheet-top:min(calc(var(--hd-h) + 56.25vw),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
+  /* YouTube-style sheet. --sheet-top is the line between video and sheet,
+     measured from the top of the layout viewport (% = its height, which
+     iOS never changes for the keyboard). It is chosen so that with
+     Safari's keyboard + accessory bar up (~340px) there is still room for
+     the sheet's header row, a strip of summary, the input bar and the
+     suggestion chips: the sheet never has to move or shrink. The NEWS30
+     header hides while the sheet is open, like YouTube. Everything is
+     offset by visualViewport.offsetTop (--vvt) so an iOS pan to the
+     focused input never visibly moves anything. */
+  .player{--sheet-top:clamp(96px,calc(100% - 530px),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
   body.no-scroll .hd{transform:translateY(var(--vvt,0px))}
-  .player.panel-open{align-items:flex-start}
-  .player.panel-open .pl-stage{height:calc(var(--sheet-top) - var(--hd-h))}
+  body:has(.player.panel-open) .hd{display:none}
+  .player.panel-open{top:var(--vvt,0px);align-items:flex-start}
+  .player.panel-open .pl-stage{height:var(--sheet-top)}
   .player.panel-open .pl-vid{object-fit:contain}
   .player.panel-open .pl-rail,.player.panel-open .pl-info,.player.panel-open .pl-grad,.player.panel-open .pl-topline{display:none}
   .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + var(--sheet-top));height:calc(100% - var(--sheet-top));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
-  /* Keyboard: the sheet stays exactly as is; only the input bar rides on
-     top of the keyboard — its bottom is the bottom of the visual viewport —
-     overlaying the bottom of the summary. With the keyboard down that is
-     the sheet's own bottom edge, so focusing/blurring doesn't jump. */
-  .pnl-foot:focus-within{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5}
+  /* Typing: the sheet stays exactly as it is, dimmed; only the input bar
+     (+ chips) floats with its bottom on the bottom of the visual viewport,
+     i.e. directly on top of the keyboard. Dim has pointer-events:none so
+     X stays tappable. */
+  .pnl.typing::after{content:"";position:absolute;inset:0;background:rgba(0,0,0,.5);pointer-events:none;z-index:4}
+  .pnl.typing .pnl-foot{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5;padding:8px 12px 0}
+  .pnl.typing .pnl-chips{display:flex}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -2662,7 +2671,14 @@ function getQuiz(story) {
 
 /* ══════ 11 · SLIDE PANELS — one shared shell for Summary & Quiz ═════ */
 
-function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
+function SlidePanel({ title, icon, headerExtra, footer, footerChips, onClose, children }) {
+  /* true while a text field in the footer has focus (keyboard up on mobile) */
+  const [typing, setTyping] = React.useState(false);
+  const onFootFocus = (e) => { if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) setTyping(true); };
+  const onFootBlur = (e) => {
+    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return;
+    setTyping(false);
+  };
   /* Touch: close on pointerdown so one tap works with the keyboard open
      (otherwise the first tap is spent blurring the input). preventDefault
      keeps focus from moving; the click that follows is swallowed so it
@@ -2690,7 +2706,7 @@ function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
     onClose();
   };
   return (
-    <div className="pnl" role="dialog" aria-label={title}>
+    <div className={cls("pnl", typing && "typing")} role="dialog" aria-label={title}>
       <div className="pnl-h">
         <h3><Icon name={icon} size={19} /> {title}</h3>
         {headerExtra}
@@ -2699,7 +2715,7 @@ function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
         </button>
       </div>
       <div className="pnl-body">{children}</div>
-      {footer && <div className="pnl-foot">{footer}</div>}
+      {footer && <div className="pnl-foot" onFocus={onFootFocus} onBlur={onFootBlur}>{footer}{footerChips && <div className="pnl-chips">{footerChips}</div>}</div>}
     </div>
   );
 }
@@ -2709,6 +2725,12 @@ const SUMMARY_MODES = [
   { id: "simple", label: "Simplify", icon: "sparkle" },
   { id: "detailed", label: "More detail", icon: "search" },
 ];
+
+/* Suggestion chips shown above the keyboard while typing (mobile). */
+const ASK_CHIPS = ["Explain simply", "Why does it matter?", "What happens next?", "Who's involved?"];
+/* Touch: don't let a tap on send/chips blur the input first — that would
+   drop the keyboard and move the button out from under the finger. */
+const keepFocus = (e) => { if (e.pointerType !== "mouse") e.preventDefault(); };
 
 function SummaryPanel({ story, onClose }) {
   const [mode, setMode] = React.useState("standard");
@@ -2723,8 +2745,11 @@ function SummaryPanel({ story, onClose }) {
     setMode("standard"); setThread([]); setDraft(""); setTuneOpen(false);
   }, [story.id]);
 
+  /* Scroll only the panel body. scrollIntoView can also scroll the page /
+     iOS visual viewport, which made the whole sheet jump. */
   React.useEffect(() => {
-    if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const body = endRef.current && endRef.current.parentElement;
+    if (body) body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
   }, [thread, busy]);
 
   const changeMode = (m) => {
@@ -2739,6 +2764,8 @@ function SummaryPanel({ story, onClose }) {
     const q = qRaw.trim();
     if (!q || busy) return;
     setDraft("");
+    // Mobile: lower the keyboard so the answer is visible in the sheet.
+    if (window.matchMedia("(max-width:767px)").matches && document.activeElement) document.activeElement.blur();
     const next = [...thread, { role: "user", text: q }];
     setThread(next);
     setBusy(true);
@@ -2769,11 +2796,14 @@ function SummaryPanel({ story, onClose }) {
             placeholder="Ask AI about this story…"
             aria-label="Ask about this story"
           />
-          <button className="send" onClick={() => ask(draft)} disabled={!draft.trim() || busy} aria-label="Send">
+          <button className="send" onPointerDown={keepFocus} onClick={() => ask(draft)} disabled={!draft.trim() || busy} aria-label="Send">
             <Icon name="send" size={16} />
           </button>
         </div>
       }
+      footerChips={ASK_CHIPS.map((c) => (
+        <button key={c} onPointerDown={keepFocus} onClick={() => ask(c)}>{c}</button>
+      ))}
     >
       {tuneOpen && (
         <div className="tune">
@@ -3276,12 +3306,27 @@ function useKeyboardInset() {
       root.setProperty("--vvt", vv.offsetTop + "px");
       root.setProperty("--vvh", vv.height + "px");
     };
+    /* Safari doesn't always fire visualViewport events mid-animation, so
+       while a text field has focus also re-sync every frame. */
+    let raf = 0;
+    const loop = () => {
+      sync();
+      const a = document.activeElement;
+      raf = a && /^(INPUT|TEXTAREA)$/.test(a.tagName) ? requestAnimationFrame(loop) : 0;
+    };
+    const onFocusIn = () => { if (!raf) raf = requestAnimationFrame(loop); };
+    const onFocusOut = () => setTimeout(sync, 0);
     vv.addEventListener("resize", sync);
     vv.addEventListener("scroll", sync);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
     sync();
     return () => {
+      if (raf) cancelAnimationFrame(raf);
       vv.removeEventListener("resize", sync);
       vv.removeEventListener("scroll", sync);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
       root.removeProperty("--vvt");
       root.removeProperty("--vvh");
     };
