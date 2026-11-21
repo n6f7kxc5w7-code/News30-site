@@ -1,6 +1,14 @@
 // /api/ask-ai.js
 // 🔌 AI SERVER PROXY — runs on Vercel's servers, never in the browser.
 //
+// NOW: Gemini first (free tier, key restored), with Google Search
+// grounding when the frontend asks for it — so Ask AI can answer about
+// today's news again, not just the model's training data. DeepSeek stays
+// as a backup only if DEEPSEEK_API_KEY is still set. Needs GEMINI_API_KEY
+// in Vercel (no VITE_ prefix). See api/_gemini.js.
+//
+// ── History (kept for context) ──
+//
 // Switched to DeepSeek after Gemini's suspension went unanswered for
 // over a week, and after Claude's per-token cost proved too high for
 // this project's £50/month ceiling. DeepSeek's API is OpenAI-compatible
@@ -32,6 +40,7 @@
 //   → { text: "..." } on success, { error: "..." } on failure.
 
 import { enforceRateLimit } from "./_rate-limit.js";
+import { geminiGenerate, geminiConfigured } from "./_gemini.js";
 
 const DEFAULT_MODEL = "deepseek-chat";
 const ENDPOINT = "https://api.deepseek.com/chat/completions";
@@ -93,20 +102,44 @@ export default async function handler(req, res) {
   if (!(await enforceRateLimit(req, res, "ask-ai", 30, 60))) return;
 
   const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    console.error("[ask-ai] DEEPSEEK_API_KEY is not set in the environment");
+  if (!apiKey && !geminiConfigured()) {
+    console.error("[ask-ai] neither GEMINI_API_KEY nor DEEPSEEK_API_KEY is set");
     res.status(500).json({ error: "AI service unavailable" });
     return;
   }
 
-  const { system, messages, model } = req.body || {};
-  // useWebSearch is destructured but intentionally unused — see the
-  // limitation note at the top of this file.
+  const { system, messages, model, useWebSearch } = req.body || {};
 
   const chatMessages = toOpenAIMessages(system, messages);
   if (chatMessages.filter((m) => m.role !== "system").length === 0) {
     res.status(400).json({ error: "messages is required" });
     return;
+  }
+
+  // ── Gemini (primary) ──
+  if (geminiConfigured()) {
+    try {
+      const turns = chatMessages
+        .filter((m) => m.role !== "system")
+        .slice(-12) // last few turns are plenty, and keep requests small
+        .map((m) => ({ role: m.role === "assistant" ? "model" : "user", text: String(m.content).slice(0, 4000) }));
+      const { text } = await geminiGenerate({
+        system: system ? String(system).slice(0, 6000) : undefined,
+        contents: turns,
+        search: useWebSearch !== false,
+        maxTokens: 4096,
+        timeoutMs: 25000,
+        totalMs: 50000,
+      });
+      res.status(200).json({ text });
+      return;
+    } catch (e) {
+      console.error("[ask-ai] Gemini failed:", String(e.message || e).slice(0, 200));
+      if (!apiKey) {
+        res.status(502).json({ error: "AI request failed" });
+        return;
+      }
+    }
   }
 
   const useModel = ALLOWED_MODELS.includes(model) ? model : DEFAULT_MODEL;

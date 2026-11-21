@@ -369,6 +369,9 @@ const BIAS = {
 const FACT = {
   verified: { label: "Verified", color: "#2ba640", icon: "check" },
   disputed: { label: "Disputed", color: "#ff9500", icon: "alertTriangle" },
+  // Real pipeline stories: we name and link the outlet, we don't claim
+  // a fact-check that never happened.
+  sourced: { label: "Sourced", color: "#8ab4f8", icon: "check" },
 };
 
 const CATEGORIES = [
@@ -509,7 +512,7 @@ const OUTLET_BIAS = {
   "daily mail": "right", "the telegraph": "right",
 };
 
-const LIVE = { ready: false, source: null, stories: { geopolitics: [], finance: [], sports: [] } };
+const LIVE = { ready: false, loaded: false, source: null, stories: { geopolitics: [], finance: [], sports: [] } };
 const LIVE_CACHE = new Map(); // id → story (deep links, saved items, notifications)
 
 function mapArticle(a, category, idx) {
@@ -620,11 +623,11 @@ function mapPublishedStory(row) {
     kicker: LIVE_KICKERS[category][seed % LIVE_KICKERS[category].length],
     source: srcName,
     bias: OUTLET_BIAS[srcName.toLowerCase()] || "centre",
-    fact: "verified",
+    fact: "sourced",
     publishedAt: Date.parse(row.article_published) || Date.parse(row.created_at) || NOW,
     duration: fmtDurAny(durationSec),
     durationSec,
-    views: 800 + Math.floor(rnd() * 240000), // placeholder until real analytics
+    views: 0, // no fake numbers — real counts can come from the events table later
     seed,
     url: row.article_url || null,
     video_url: row.video_url || null,
@@ -678,38 +681,42 @@ const storiesService = {
     }
   },
 };
+/* One story by id, for shared links to stories older than the newest
+   200 (or opened before the feed finished loading). */
+storiesService.loadOne = async (storyId) => {
+  if (!supabase) return null;
+  const rawId = String(storyId).replace(/^pub-/, "");
+  if (!/^[0-9a-f-]{36}$/i.test(rawId)) return null;
+  try {
+    const { data, error } = await supabase
+      .from("published_stories")
+      .select("id, headline, source, category, article_url, article_published, created_at, script, audio_url, video_url, thumbnail_url, duration_seconds, status, quiz")
+      .eq("id", rawId)
+      .eq("status", "ready")
+      .maybeSingle();
+    if (error || !data || !data.video_url) return null;
+    return mapPublishedStory(data);
+  } catch (e) {
+    return null;
+  }
+};
+
 const PAGE_SIZE = 12;
 /** Feed pager. Serves live NewsAPI headlines when loaded; otherwise
     page 0 = curated samples and deeper pages walk back through the
     dated archive. In live mode, pages beyond the API supply continue
     into the archive so infinite scroll never dead-ends. */
 function getFeed(category, page) {
-    if (newsService.isLive()) {
-       const live = newsService.page(category, page);
-       if (live.length) return live;
-       /* Published stories are the real pipeline output — when they're the
-       source, an empty page means the end of the feed, not a cue to fall
-       back to curated samples or the generated archive. */
-       if (LIVE.source === "published") return [];
-  }
-  if (page === 0) {
-    if (category === "all") return CURATED_ALL.slice().sort((a, b) => b.publishedAt - a.publishedAt);
-    return CURATED[category].slice();
-  }
-  const out = [];
-  const start = (page - 1) * PAGE_SIZE;
-  if (category === "all") {
-    const cats = ["geopolitics", "finance", "sports"];
-    for (let i = start; i < start + PAGE_SIZE; i++) out.push(makeArchiveStory(cats[i % 3], Math.floor(i / 3)));
-  } else {
-    for (let i = start; i < start + PAGE_SIZE; i++) out.push(makeArchiveStory(category, i));
-  }
-  return out;
+  /* Real pipeline videos ONLY. No sample stories, no headline-only cards
+     with a fake player, no generated archive. An empty page is simply the
+     end of the feed. */
+  if (LIVE.source !== "published") return [];
+  return newsService.page(category, page);
 }
 
 function getTrending() {
-  const pool = newsService.isLive() ? newsService.all() : [...getFeed("all", 0), ...getFeed("all", 1)];
-  return pool.slice().sort((a, b) => b.views - a.views).slice(0, 18);
+  const pool = LIVE.source === "published" ? newsService.all() : [];
+  return pool.slice().sort((a, b) => b.publishedAt - a.publishedAt).slice(0, 18);
 }
 
 function findStoryById(id) {
@@ -2170,6 +2177,7 @@ function InfiniteFeed({ category, fresh, feedVersion, openPlayer, onCardMenu }) 
     [category, pages, feedVersion]
   );
    const done = pages >= MAX_PAGES || exhausted;
+  const empty = items.length === 0;
 
 
   React.useEffect(() => {
@@ -2187,6 +2195,16 @@ function InfiniteFeed({ category, fresh, feedVersion, openPlayer, onCardMenu }) 
     io.observe(el);
     return () => io.disconnect();
   }, [loading, done, category]);
+
+  if (empty) {
+    return LIVE.loaded ? (
+      <div className="feed-end">New videos are being made right now — check back in a few minutes.</div>
+    ) : (
+      <div className="grid">
+        <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
+      </div>
+    );
+  }
 
   return (
     <React.Fragment>
@@ -2514,6 +2532,18 @@ function altSource(story) {
 
 /** Returns { intro:[…], points:[…], sources:[[name,note]…] } for a mode. */
 function getSummary(story, mode) {
+  /* Real stories: summarise from the actual script, never from the
+     generic filler below (which invented context like "a crowded
+     diplomatic calendar" and a fact-check that didn't exist). */
+  if (story.script) {
+    const sentences = (story.script.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [story.script])
+      .map((x) => x.trim()).filter(Boolean);
+    const sources = [[story.source, "Original report"]];
+    const points = sentences.slice(0, 4);
+    if (mode === "simple") return { intro: [sentences.slice(0, 2).join(" ")], points: points.slice(0, 2), sources };
+    if (mode === "detailed") return { intro: [story.script.trim()], points: sentences, sources };
+    return { intro: [sentences.slice(0, 3).join(" ")], points, sources };
+  }
   const c = CURATED_INSIGHT[story.id];
   if (c) {
     if (mode === "simple") return { intro: [c.simple], points: c.points.slice(0, 2), sources: c.sources };
@@ -3031,7 +3061,6 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   }, [next, prev, panel, onClose]);
 
   const liked = userData.engagement.likedIds.includes(story.id);
-  const likeCount = Math.floor(story.views * 0.042) + (liked ? 1 : 0);
   const doLike = () => {
     if (!liked) setHeartKey((k) => k + 1);
     dispatch({ type: "LIKE_TOGGLED", storyId: story.id }); // 🔌 engagement event
@@ -3114,7 +3143,6 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
               <BiasTag bias={story.bias} />
               <FactTag fact={story.fact} />
               <span className="mdot">{timeAgo(story.publishedAt)}</span>
-              <span className="mdot">{fmtCount(story.views)} views</span>
             </div>
           </div>
           <div className="pl-prog"><i style={{ width: progress * 100 + "%" }} /></div>
@@ -3135,7 +3163,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
                 <Icon name="heart" size={24} filled={liked} />
               </span>
             </button>
-            {fmtCount(likeCount)}
+            {liked ? "Liked" : "Like"}
           </div>
           <div className="rail-btn">
             <button className="ibtn" onClick={() => setPanel(panel === "summary" ? null : "summary")}
@@ -3272,51 +3300,34 @@ function App() {
     const prevTitle = document.title;
     document.title = "News30 — AI news in 30 seconds";
 
-    // 🔌 SHARE deep-link: #/story/{id} opens that story on load
-    const m = window.location.hash.match(/#\/story\/([\w-]+)/);
-    if (m) {
-      const s = findStoryById(m[1]);
-      if (s) setPlayer({ list: [s], index: 0 });
-    }
+    // 🔌 SHARE deep-link: handled in the LIVE NEWS effect below, once
+    // the stories have actually loaded.
     return () => { document.head.removeChild(style); document.title = prevTitle; };
   }, []);
 
-  /* 🔌 LIVE NEWS: pull real headlines on mount via the /api/news proxy.
-     `newsVersion` bumps once loaded so the feed re-renders with real
-     stories; on failure everything stays on the curated samples. */
+  /* 🔌 LIVE NEWS: real pipeline videos only. No NewsAPI headline
+     fallback, no sample stories, no fake "breaking news" demo. The
+     version always bumps so the feed can swap skeletons for either the
+     videos or the "being made" message. Shared links (#/story/pub-…)
+     open once the data is here, fetching the story directly if it isn't
+     in the newest batch. */
   const [newsVersion, setNewsVersion] = React.useState(0);
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      const gotStories = await storiesService.load();
+      await storiesService.load();
+      LIVE.loaded = true;
       if (cancelled) return;
-      if (gotStories) {
-        setNewsVersion((v) => v + 1);
-        toast("Latest videos loaded", "flame");
-        return;
-      }
-      const gotHeadlines = await newsService.load();
-      if (cancelled || !gotHeadlines) return;
       setNewsVersion((v) => v + 1);
-      toast("Live headlines loaded", "flame");
+
+      const m = window.location.hash.match(/#\/story\/([\w-]+)/);
+      if (m) {
+        const s = LIVE_CACHE.get(m[1]) || (await storiesService.loadOne(m[1]));
+        if (!cancelled && s) setPlayer({ list: [s], index: 0 });
+      }
     })();
     return () => { cancelled = true; };
-  }, [toast]);
-
-  /* Demo of "breaking news" — a sample story posts 30s after load,
-     lands top of feed + fires a notification + toast. Skipped once
-     real NewsAPI headlines are live. 🔌 Real build: websocket /
-     polling NEWS_API pushes into `fresh` + `notifs`.                 */
-  React.useEffect(() => {
-    const t = setTimeout(() => {
-      if (newsService.isLive()) return;
-      const b = makeBreakingStory();
-      setFresh((f) => [b, ...f]);
-      setNotifs((n) => [{ id: "live-" + b.id, storyId: b.id, title: b.headline, at: b.publishedAt, read: false }, ...n]);
-      toast("New story just posted", "flame");
-    }, 30000);
-    return () => clearTimeout(t);
-  }, [toast]);
+  }, []);
 
   /* 🔌 SUPABASE PERSISTENCE: debounced whole-state upsert on every
      change while signed in. Guests / unconfigured = local-only. */

@@ -65,6 +65,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
+import { geminiGenerate, geminiConfigured } from "./_gemini.js";
 
 const DEEPSEEK_MODEL = "deepseek-chat";
 const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
@@ -332,6 +333,52 @@ function checkLength(script, hadDescription) {
   }
 }
 
+/* Gemini first (free tier), DeepSeek only as a backup if its key is still
+   set. Either way the same prompt and the same parser are used, so the
+   scripts, image queries and quiz come out in the same shape. */
+async function callScriptModel(prompt, deepseekKey) {
+  if (geminiConfigured()) {
+    try {
+      const { text, model } = await geminiGenerate({
+        contents: [{ role: "user", text: prompt }],
+        json: true,
+        maxTokens: 8192,   // newer Flash models "think" first; that counts here
+        timeoutMs: 22000,
+        totalMs: 34000,    // leave the rest of Vercel's 60s for narration
+      });
+      console.log("[generate-audio] script by", model);
+      return text;
+    } catch (e) {
+      console.error("[generate-audio] Gemini failed:", String(e.message || e).slice(0, 200));
+      if (!deepseekKey) throw new Error("Script generation failed (Gemini)");
+    }
+  }
+  if (!deepseekKey) throw new Error("No script model configured (set GEMINI_API_KEY)");
+
+  const upstream = await fetch(DEEPSEEK_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + deepseekKey, // header, never a query string
+    },
+    body: JSON.stringify({
+      model: DEEPSEEK_MODEL,
+      max_tokens: MAX_TOKENS,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await upstream.json().catch(() => ({}));
+  if (!upstream.ok) {
+    // Logged, never returned — upstream error payloads can echo request
+    // context back. 402 here = DeepSeek balance is empty.
+    console.error("[generate-audio] DeepSeek error", upstream.status, JSON.stringify(data));
+    throw new Error("Script generation failed (DeepSeek " + upstream.status + ")");
+  }
+  console.log("[generate-audio] script by DeepSeek");
+  return (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || "").trim();
+}
+
 async function generateScript(headline, category, apiKey, description) {
   /* The summary is the difference between a 70-word script and an
      18-word one. Without it the model has only the headline to work
@@ -347,45 +394,19 @@ async function generateScript(headline, category, apiKey, description) {
     (summary ? "\nSummary: " + summary : "") +
     "\nCategory: " + (category || "news");
 
-  const upstream = await fetch(DEEPSEEK_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + apiKey, // header, never a query string
-    },
-    body: JSON.stringify({
-      model: DEEPSEEK_MODEL,
-      max_tokens: MAX_TOKENS,
-      // Forces the model to emit a JSON object — the prompt still has
-      // to specify the shape, but this cuts down on stray prose around
-      // the JSON that the defensive parser would otherwise have to strip.
-      response_format: { type: "json_object" },
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  const data = await upstream.json().catch(() => ({}));
-
-  if (!upstream.ok) {
-    // Logged, never returned — upstream error payloads can echo request
-    // context back.
-    console.error("[generate-audio] DeepSeek error", upstream.status, JSON.stringify(data));
-    throw new Error("Script generation failed (" + upstream.status + ")");
-  }
-
-  const raw = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || "").trim();
+  const raw = (await callScriptModel(prompt, apiKey)).trim();
 
   const parsed = parseScriptResponse(raw);
   if (!parsed) {
-    console.error("[generate-audio] could not parse DeepSeek response:", raw.slice(0, 400));
+    console.error("[generate-audio] could not parse script response:", raw.slice(0, 400));
     throw new Error("Script generation returned an unusable response");
   }
 
   if (!parsed.imageQueries.length) {
-    console.warn("[generate-audio] DeepSeek returned no usable imageQueries; falling back to keyword map");
+    console.warn("[generate-audio] model returned no usable imageQueries; falling back to keyword map");
   }
   if (!parsed.quiz.length) {
-    console.warn("[generate-audio] DeepSeek returned no usable quiz; front end will fall back to generated questions");
+    console.warn("[generate-audio] model returned no usable quiz; front end will fall back to generated questions");
   }
   // Not a warning — plenty of stories genuinely have no named subject,
   // and forcing entities onto those is the failure mode to watch for.
@@ -492,8 +513,8 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Server is not configured for audio generation" });
     return;
   }
-  if (!providedScript && !deepseekKey) {
-    console.error("[generate-audio] DEEPSEEK_API_KEY missing but script generation was requested");
+  if (!providedScript && !deepseekKey && !geminiConfigured()) {
+    console.error("[generate-audio] no GEMINI_API_KEY or DEEPSEEK_API_KEY, but script generation was requested");
     res.status(500).json({ error: "Server is not configured for script generation" });
     return;
   }
