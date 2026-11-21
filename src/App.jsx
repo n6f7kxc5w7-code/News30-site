@@ -1475,19 +1475,26 @@ const CSS2 = `
   .menu{left:8px;right:8px;width:auto;top:calc(var(--hd-h) - 2px)}
   .main{padding-left:0 !important;padding-bottom:56px}
   .ph{font-size:18px;padding:16px 0 2px}
-  .player{bottom:0;z-index:63}
+  .player{z-index:63}
   .pl-stage{height:100%;max-height:none;width:100%}
   .pl-video{aspect-ratio:auto;width:100%;height:100%;border-radius:0;box-shadow:none}
   .pl-rail{position:absolute;right:6px;bottom:26px;z-index:3;padding:0;gap:17px}
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  /* Pinned to the VISUAL viewport (see useKeyboardInset): top/height come
-     from visualViewport.offsetTop/height, so whatever iOS does with the
-     keyboard or its scroll-into-view, the panel's bottom edge is the top
-     of the keyboard. No bottom offset — that double-counted offsetTop. */
-  .pnl{position:fixed;left:0;right:0;bottom:auto;--pnl-h:min(calc(var(--vvh,100dvh) * .68),calc(var(--vvh,100dvh) - 24px));top:calc(var(--vvt,0px) + var(--vvh,100dvh) - var(--pnl-h));height:var(--pnl-h);width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
-  .pnl:focus-within{--pnl-h:var(--vvh,100dvh);border-radius:0}
+  /* iMessage-style keyboard: the panel is pinned to the VISUAL viewport
+     (see useKeyboardInset). Its top sits at the normal 32% line plus
+     visualViewport.offsetTop, so it never moves on screen; its bottom is the
+     bottom of the visual viewport, i.e. the top of the keyboard. Only the
+     height changes: the input bar rides on the keyboard and .pnl-body
+     shrinks and scrolls. % here is of the layout viewport, which iOS does
+     not resize for the keyboard. */
+  .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + max(32%,24px));height:calc(var(--vvh,100%) - max(32%,24px));min-height:112px;width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
+  /* If Safari still scrolls the visual viewport (offsetTop > 0), move the
+     header and the video down by the same amount so nothing above the
+     panel visibly jumps. Only while the player has the body locked. */
+  body.no-scroll .hd{transform:translateY(var(--vvt,0px))}
+  .player{top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -2651,12 +2658,26 @@ function getQuiz(story) {
 /* ══════ 11 · SLIDE PANELS — one shared shell for Summary & Quiz ═════ */
 
 function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
+  /* Touch: close on pointerdown so one tap works with the keyboard open
+     (otherwise the first tap is spent blurring the input). preventDefault
+     keeps focus from moving; the click that follows is swallowed so it
+     can't land on the video behind the now-closed panel. Mouse is
+     unchanged and still closes via onClick. */
+  const closeOnTouch = (e) => {
+    if (e.pointerType === "mouse") return;
+    e.preventDefault();
+    const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+    document.addEventListener("click", swallow, true);
+    setTimeout(() => document.removeEventListener("click", swallow, true), 600);
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    onClose();
+  };
   return (
     <div className="pnl" role="dialog" aria-label={title}>
       <div className="pnl-h">
         <h3><Icon name={icon} size={19} /> {title}</h3>
         {headerExtra}
-        <button className="ibtn" onClick={onClose} aria-label="Close panel">
+        <button className="ibtn" onClick={onClose} onPointerDown={closeOnTouch} aria-label="Close panel">
           <Icon name="x" size={20} />
         </button>
       </div>
