@@ -114,6 +114,24 @@ const THUMB_RETENTION_DAYS = 30;   // thumbnails — see above
 
 const STORAGE_BUCKET = "media";
 
+// The newest N ready videos are NEVER deleted, however old they are.
+// Without this, a pipeline that stalls for three days (out of credits,
+// an API change) empties the site completely. With it, the site always
+// shows at least the last ~45 real videos while the pipeline is fixed.
+// Cost: at most ~45 × 3.3 MB ≈ 150 MB of the 1 GB, and normally zero
+// extra because the newest 45 are inside the 3-day window anyway.
+const KEEP_NEWEST = 45;
+
+// "https://x.supabase.co/storage/v1/object/public/media/video/a.mp4"
+//   → "video/a.mp4"
+function storagePathFromUrl(url) {
+  if (!url) return null;
+  const marker = "/" + STORAGE_BUCKET + "/";
+  const i = String(url).indexOf(marker);
+  if (i < 0) return null;
+  return decodeURIComponent(String(url).slice(i + marker.length).split("?")[0]);
+}
+
 // Outlets that break stories rather than repackage them. Anything
 // unlisted scores 1 — unknown, not penalised.
 const SOURCE_TIER = {
@@ -285,7 +303,33 @@ async function listExpired(supabase, folder, cutoffMs) {
  */
 async function cleanupOldMedia(supabase) {
   const mediaCutoffMs = Date.now() - RETENTION_DAYS * 86400000;
-  const result = { checked: 0, deleted: 0, failed: 0 };
+  const result = { checked: 0, deleted: 0, failed: 0, protected: 0 };
+
+  // Files and rows of the newest KEEP_NEWEST ready videos are off-limits.
+  // If this lookup fails, delete nothing this run — being 4 hours late
+  // on cleanup is harmless, wiping the site is not.
+  const keepPaths = new Set();
+  let keepIds = [];
+  try {
+    const { data: newest, error } = await supabase
+      .from("published_stories")
+      .select("id, video_url, audio_url, thumbnail_url")
+      .eq("status", "ready")
+      .not("video_url", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(KEEP_NEWEST);
+    if (error) throw new Error(error.message);
+    for (const row of newest || []) {
+      keepIds.push(row.id);
+      for (const u of [row.video_url, row.audio_url, row.thumbnail_url]) {
+        const path = storagePathFromUrl(u);
+        if (path) keepPaths.add(path);
+      }
+    }
+  } catch (e) {
+    console.error("[ingest] cleanup skipped — could not read newest videos:", String(e.message || e));
+    return result;
+  }
 
   for (const { folder, days } of CLEANUP_FOLDERS) {
     const cutoffMs = Date.now() - days * 86400000;
@@ -297,6 +341,9 @@ async function cleanupOldMedia(supabase) {
       continue;
     }
 
+    const before = paths.length;
+    paths = paths.filter((p) => !keepPaths.has(p));
+    result.protected += before - paths.length;
     result.checked += paths.length;
 
     for (let i = 0; i < paths.length; i += REMOVE_CHUNK) {
@@ -316,11 +363,13 @@ async function cleanupOldMedia(supabase) {
      created before its files, so any row older than the cutoff has files
      older than the cutoff too. Harmless when there is nothing to clear. */
   try {
-    const { error } = await supabase
+    let q = supabase
       .from("published_stories")
       .update({ video_url: null, audio_url: null })
       .lt("created_at", new Date(mediaCutoffMs).toISOString())
       .not("video_url", "is", null);
+    if (keepIds.length) q = q.not("id", "in", "(" + keepIds.join(",") + ")");
+    const { error } = await q;
     if (error) console.error("[ingest] cleanup column clear failed:", error.message);
   } catch (e) {
     console.error("[ingest] cleanup column clear errored:", String(e).slice(0, 160));
@@ -328,7 +377,7 @@ async function cleanupOldMedia(supabase) {
 
   console.log(
     "[ingest] cleanup: found", result.checked, "expired files,",
-    result.deleted, "deleted,", result.failed, "failed",
+    result.deleted, "deleted,", result.failed, "failed,", result.protected, "kept (newest " + KEEP_NEWEST + ")",
     "(video/narration >", RETENTION_DAYS, "days; thumbs >", THUMB_RETENTION_DAYS, "days)"
   );
 
