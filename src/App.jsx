@@ -1334,13 +1334,18 @@ const CSS2 = `
 /* Full-screen Ask AI chat (mobile). A fixed box sized to the visual
    viewport: iOS shrinks the visual viewport for the keyboard, so the
    input bar at the bottom of this box sits on the keyboard natively. */
-.achat{position:fixed;left:0;right:0;top:var(--vvt,0px);height:var(--vvh,100%);z-index:90;background:var(--bg);display:flex;flex-direction:column;overscroll-behavior:contain;animation:fade .15s}
+.achat{position:fixed;inset:0;z-index:90;background:var(--bg);overflow:hidden;overscroll-behavior:none;animation:fade .15s}
+/* The visible column: height = visualViewport.height, moved down by
+   visualViewport.offsetTop (set from JS on every vv resize/scroll). The
+   opaque .achat behind it covers everything else, keyboard area included. */
+.achat-col{position:absolute;left:0;right:0;top:0;height:100%;display:flex;flex-direction:column;background:var(--bg);will-change:transform}
 .achat-h{flex:none;display:flex;align-items:center;gap:10px;padding:8px 6px 8px 16px;border-bottom:1px solid var(--line2)}
 .achat-h h3{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .achat-h .ibtn{flex:none;width:44px;height:44px}
 .achat-body{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:16px}
 .achat-empty{color:var(--txt2);font-size:14px;text-align:center;padding:24px 8px}
 .achat-foot{flex:none;padding:6px 12px 8px;border-top:1px solid var(--line2);background:var(--bg)}
+.achat-chips{flex:none}
 .achat-chips{display:flex;gap:8px;overflow-x:auto;margin:0 -12px 8px;padding:2px 12px;scrollbar-width:none}
 .achat-chips::-webkit-scrollbar{display:none}
 .achat-chips button{flex:none;border:0;border-radius:999px;background:var(--raised);color:inherit;font:inherit;font-size:14px;padding:8px 14px;white-space:nowrap;cursor:pointer}
@@ -2701,12 +2706,44 @@ function useIsMobile() {
    rides on top of the keyboard; the page behind stays locked. */
 function AskChat({ story, thread, busy, draft, setDraft, ask, inputRef, onClose }) {
   const bodyRef = React.useRef(null);
-  React.useEffect(() => {
+  const colRef = React.useRef(null);
+  const toBottom = React.useCallback(() => {
     const b = bodyRef.current;
     if (b) b.scrollTop = b.scrollHeight;
-  }, [thread, busy]);
+  }, []);
+
+  /* Newest message stays above the input: after sending, when the answer
+     arrives (thread/busy change)… */
+  React.useEffect(() => { toBottom(); }, [thread, busy, toBottom]);
+
+  /* …and whenever the keyboard opens/closes. The column is written straight
+     to the DOM on every visualViewport resize AND scroll, so it never lags
+     behind Safari. If the window itself scrolls, put it back. */
+  React.useLayoutEffect(() => {
+    const vv = window.visualViewport;
+    const col = colRef.current;
+    let lastH = -1;
+    const sync = () => {
+      if (!col) return;
+      const h = vv ? vv.height : window.innerHeight;
+      const t = vv ? vv.offsetTop : 0;
+      col.style.height = h + "px";
+      col.style.transform = "translateY(" + t + "px)";
+      if (h !== lastH) { lastH = h; toBottom(); }
+    };
+    const onWinScroll = () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); sync(); };
+    sync();
+    if (vv) { vv.addEventListener("resize", sync); vv.addEventListener("scroll", sync); }
+    window.addEventListener("scroll", onWinScroll);
+    return () => {
+      if (vv) { vv.removeEventListener("resize", sync); vv.removeEventListener("scroll", sync); }
+      window.removeEventListener("scroll", onWinScroll);
+    };
+  }, [toBottom]);
+
   return createPortal(
     <div className="achat" role="dialog" aria-label="Ask AI">
+      <div className="achat-col" ref={colRef}>
       <div className="achat-h">
         <h3>{story.headline}</h3>
         <button className="ibtn" onPointerDown={(e) => tapClose(e, onClose)} onClick={onClose} aria-label="Close chat">
@@ -2742,6 +2779,7 @@ function AskChat({ story, thread, busy, draft, setDraft, ask, inputRef, onClose 
             <Icon name="send" size={16} />
           </button>
         </div>
+      </div>
       </div>
     </div>,
     document.body
@@ -2846,7 +2884,7 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
           <Icon name="tune" size={19} />
         </button>
       }
-      footer={mobile ? (
+      footer={mobile && chatOpen ? null : mobile ? (
         <button className="ask-fake" onClick={openChat} aria-label="Ask AI about this story">
           Ask AI about this story…
           <span className="send" aria-hidden="true"><Icon name="send" size={16} /></span>
@@ -3362,32 +3400,6 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 
 /* ═══════════════════ 13 · APP ROOT — state + wiring ════════════════ */
 
-/* iOS Safari doesn't resize the layout viewport when the keyboard opens;
-   it shrinks the visual viewport and scrolls it (offsetTop) to reveal the
-   focused field. The full-screen Ask AI chat (.achat) is sized to that
-   visible rectangle: --vvt = visualViewport.offsetTop,
-   --vvh = visualViewport.height, so its bottom is the top of the keyboard. */
-function useKeyboardInset() {
-  React.useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    const root = document.documentElement.style;
-    const sync = () => {
-      root.setProperty("--vvt", vv.offsetTop + "px");
-      root.setProperty("--vvh", vv.height + "px");
-    };
-    vv.addEventListener("resize", sync);
-    vv.addEventListener("scroll", sync);
-    sync();
-    return () => {
-      vv.removeEventListener("resize", sync);
-      vv.removeEventListener("scroll", sync);
-      root.removeProperty("--vvt");
-      root.removeProperty("--vvh");
-    };
-  }, []);
-}
-
 function useViewport() {
   const [w, setW] = React.useState(typeof window !== "undefined" ? window.innerWidth : 1280);
   React.useEffect(() => {
@@ -3405,7 +3417,6 @@ function App() {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
-  useKeyboardInset();
   const [view, setView] = React.useState("home");
   const [category, setCategory] = React.useState("all");
   const [sbFull, setSbFull] = React.useState(true);   // desktop full vs mini
