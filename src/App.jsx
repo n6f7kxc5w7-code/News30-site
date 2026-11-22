@@ -1486,19 +1486,19 @@ const CSS2 = `
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
   /* YouTube-style sheet. --sheet-top is the line between video and sheet,
-     measured from the top of the layout viewport (% = its height, which
-     iOS never changes for the keyboard). It is chosen so that with
-     Safari's keyboard + accessory bar up (~340px) there is still room for
-     the sheet's header row, a strip of summary, the input bar and the
-     suggestion chips: the sheet never has to move or shrink. The NEWS30
-     header hides while the sheet is open, like YouTube. Everything is
-     offset by visualViewport.offsetTop (--vvt) so an iOS pan to the
-     focused input never visibly moves anything. */
-  .player{--sheet-top:clamp(96px,calc(100% - 530px),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
+     from the top of the layout viewport (svh: Safari's toolbars-shown height,
+     which the keyboard never changes). It is fixed while the sheet is open and is
+     chosen so that, with Safari's keyboard + accessory bar up (~340px) and
+     the floating input bar + chips (~100px) on top of it, the NEWS30 bar,
+     the video and the sheet's header row stay fully visible and a line of
+     summary still shows (dimmed). Opening the keyboard moves and resizes
+     nothing: it just covers the lower part of the sheet. Everything is
+     offset by visualViewport.offsetTop (--vvt) so an iOS pan to the focused
+     input never visibly moves anything. */
+  .player{--sheet-top:clamp(calc(var(--hd-h) + 96px),calc(100svh - 525px),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
   body.no-scroll .hd{transform:translateY(var(--vvt,0px))}
-  body:has(.player.panel-open) .hd{display:none}
-  .player.panel-open{top:var(--vvt,0px);align-items:flex-start}
-  .player.panel-open .pl-stage{height:var(--sheet-top)}
+  .player.panel-open{align-items:flex-start}
+  .player.panel-open .pl-stage{height:calc(var(--sheet-top) - var(--hd-h))}
   .player.panel-open .pl-vid{object-fit:contain}
   .player.panel-open .pl-rail,.player.panel-open .pl-info,.player.panel-open .pl-grad,.player.panel-open .pl-topline{display:none}
   .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + var(--sheet-top));height:calc(100% - var(--sheet-top));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
@@ -1507,8 +1507,8 @@ const CSS2 = `
      i.e. directly on top of the keyboard. Dim has pointer-events:none so
      X stays tappable. */
   .pnl.typing::after{content:"";position:absolute;inset:0;background:rgba(0,0,0,.5);pointer-events:none;z-index:4}
-  .pnl.typing .pnl-foot{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5;padding:8px 12px 0}
-  .pnl.typing .pnl-chips{display:flex}
+  .pnl.typing .pnl-foot{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5;padding:8px 12px 0;border-top:0}
+  .pnl.typing .pnl-chips{display:flex;padding:6px 12px 8px}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
