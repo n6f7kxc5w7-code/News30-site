@@ -17,11 +17,11 @@
 // Reads Supabase over REST with the public anon key (same access the
 // browser already has); falls back to the service key if anon is unset.
 // Env: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, optional SITE_URL
-// (default https://news30.live), optional GOOGLE_SITE_VERIFICATION.
+// (default https://www.news30.live), optional GOOGLE_SITE_VERIFICATION.
 
 import { storyPath, uuidFromSlug } from "../src/slug.js";
 
-const SITE_URL = (process.env.SITE_URL || "https://news30.live").replace(/\/+$/, "");
+const SITE_URL = (process.env.SITE_URL || "https://www.news30.live").replace(/\/+$/, "");
 const SITE_NAME = "News30";
 const THIN_WORDS = 40;               // below this a story page is noindex
 const THUMB_MAX_AGE_DAYS = 29;       // thumbnails are swept after 30 days (api/cron/ingest.js)
@@ -61,7 +61,7 @@ const CACHE = {
   page: "public, max-age=0, s-maxage=300, stale-while-revalidate=3600",
   story: "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400",
   sitemap: "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400",
-  missing: "public, max-age=0, s-maxage=60",
+  missing: "no-store", // never let the edge pin a 404 on a URL that may resolve a moment later
   error: "no-store",
 };
 
@@ -135,8 +135,9 @@ function supabaseConfig() {
   return { url: url.replace(/\/+$/, ""), key };
 }
 
-async function sbSelect(query, { from, to } = {}) {
-  const { url, key } = supabaseConfig();
+async function sbSelect(query, { from, to, key: keyOverride } = {}) {
+  const { url, key: defaultKey } = supabaseConfig();
+  const key = keyOverride || defaultKey;
   const headers = { apikey: key, Authorization: "Bearer " + key, Accept: "application/json" };
   if (from != null) headers.Range = from + "-" + to;
   const res = await fetch(url + "/rest/v1/published_stories?" + query, { headers });
@@ -396,17 +397,67 @@ async function categoryPage(req, res, cat) {
   send(res, 200, CACHE.page, render(template, { head, body, rootAttrs: ' data-category="' + cat + '"' }));
 }
 
-async function storyPage(req, res, slugParam) {
-  const uuid = uuidFromSlug(slugParam);
+const first = (v) => (Array.isArray(v) ? v[0] : v);
+const safeDecode = (s) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+
+/* Where the story segment ("<slug>-<uuid>") can come from. The rewrite
+   puts it in ?slug=, but on Vercel req.query.slug can arrive as an array
+   or encoded, and req.url may be the original /story/... path or the
+   rewritten /api/seo?... one. Every source is tried; the original path wins. */
+function storyRequest(req) {
+  const candidates = [];
+  for (const u of [req.url, req.headers["x-matched-path"], req.headers["x-forwarded-uri"], req.headers["x-original-url"]]) {
+    if (!u) continue;
+    const m = safeDecode(String(u).split(/[?#]/)[0]).match(/^\/story\/([^/]+)/);
+    if (m) candidates.push(m[1]);
+  }
+  const q = (req.query && req.query.slug) ?? [];
+  for (const v of [].concat(q)) candidates.push(safeDecode(String(v)));
+  for (const c of candidates) {
+    const uuid = uuidFromSlug(c);
+    if (uuid) return { segment: c.replace(/\/+$/, ""), uuid, candidates };
+  }
+  return { segment: candidates[0] || "", uuid: null, candidates };
+}
+
+/* Row by id. status is checked in code, not in the query, so the logs can
+   tell "no such row" apart from "row exists but isn't ready". If the anon
+   key sees nothing but a service key is configured, retry with it: an RLS
+   policy hiding the row from anon must not 404 a story the sitemap lists.
+   Only status='ready' rows are ever rendered, whichever key found them. */
+async function findStory(uuid) {
+  const query = "select=" + STORY_COLS + ",status&id=eq." + uuid + "&limit=1";
+  let rows = await sbSelect(query);
+  console.log("[seo] story lookup:", JSON.stringify({ uuid, rows: rows.length, status: rows[0] && rows[0].status }));
+  const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!rows.length && service && service !== supabaseConfig().key) {
+    rows = await sbSelect(query, { key: service });
+    console.log("[seo] story lookup (service key):", JSON.stringify({ uuid, rows: rows.length, status: rows[0] && rows[0].status }));
+  }
+  const row = rows[0];
+  if (row && row.status !== "ready") {
+    console.log("[seo] story not ready:", uuid, row.status);
+    return null;
+  }
+  return row || null;
+}
+
+async function storyPage(req, res) {
+  const { segment, uuid, candidates } = storyRequest(req);
+  // TEMP: diagnosing story 404s on Vercel — remove once confirmed fixed.
+  console.log("[seo] story request:", JSON.stringify({ url: req.url, querySlug: req.query && req.query.slug, candidates, segment, uuid }));
   if (!uuid) return notFound(req, res);
 
   let row, related = [];
   try {
-    const [rows, latest] = await Promise.all([
-      sbSelect("select=" + STORY_COLS + "&id=eq." + uuid + "&status=eq.ready&limit=1"),
-      latestStories().catch(() => []),
-    ]);
-    row = rows[0];
+    const [found, latest] = await Promise.all([findStory(uuid), latestStories().catch(() => [])]);
+    row = found;
     if (row) {
       const cat = normaliseCategory(row.category);
       related = latest.filter((r) => r.id !== row.id && normaliseCategory(r.category) === cat).slice(0, 8);
@@ -419,7 +470,7 @@ async function storyPage(req, res, slugParam) {
 
   // Wrong / missing slug (headline edited, legacy /story/<uuid>) → canonical.
   const path = pathFor(row);
-  if (String(slugParam).replace(/\/+$/, "") !== path.slice("/story/".length)) {
+  if (segment.toLowerCase() !== path.slice("/story/".length)) {
     res.setHeader("Cache-Control", CACHE.story);
     res.setHeader("Location", path);
     return res.status(301).send("");
@@ -596,11 +647,13 @@ async function sitemap(req, res) {
 
 export default async function handler(req, res) {
   const q = req.query || {};
-  const page = String(q.page || "home");
+  let page = String(first(q.page) || "home");
+  // A /story/ path is a story whatever the query says.
+  if (/^\/story\//.test(String(req.url || ""))) page = "story";
   try {
     if (page === "sitemap") return await sitemap(req, res);
-    if (page === "story") return await storyPage(req, res, String(q.slug || ""));
-    if (page === "category") return await categoryPage(req, res, String(q.cat || ""));
+    if (page === "story") return await storyPage(req, res);
+    if (page === "category") return await categoryPage(req, res, String(first(q.cat) || ""));
     if (page === "home") return await homePage(req, res);
     return await notFound(req, res);
   } catch (e) {

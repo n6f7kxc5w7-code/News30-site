@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /api/
 
-Sitemap: https://news30.live/sitemap.xml
+Sitemap: https://www.news30.live/sitemap.xml

@@ -58,7 +58,7 @@ browser  →  /api/ask-ai          →  Gemini
 | `SUPABASE_SERVICE_ROLE_KEY` | all pipeline functions | Backend DB/storage writes — **full access, never expose** |
 | `PIPELINE_ENABLED` | `generate-audio.js`, `generate-video.js` | Kill switch. Set to `false` to halt all rendering instantly with no redeploy |
 | `GOOGLE_SITE_VERIFICATION` | `seo.js` | Optional. The `content` value of Google Search Console's HTML-tag verification; output as `<meta name="google-site-verification">` on the home page |
-| `SITE_URL` | `seo.js` | Optional. Canonical origin for canonical/OG URLs and the sitemap. Defaults to `https://news30.live` |
+| `SITE_URL` | `seo.js` | Optional. Canonical origin for canonical/OG URLs and the sitemap. Defaults to `https://www.news30.live` |
 
 **Client-side — public by design.**
 
