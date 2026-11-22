@@ -228,14 +228,22 @@ const STATIC_CSS = `<style>
 .n30s footer{margin-top:40px;color:#888;font-size:13px}
 </style>`;
 
+// Branded 1200×630 fallback (public/og-default.png) for pages/stories
+// without a live thumbnail.
+const DEFAULT_IMAGE = SITE_URL + "/og-default.png";
+const DEFAULT_IMAGE_W = 1200;
+const DEFAULT_IMAGE_H = 630;
+
+// Full Organization node, not just an @id reference: Google's Article
+// validator wants author/publisher name + url inline.
 const orgLd = () => ({
   "@type": "Organization",
   "@id": SITE_URL + "/#organization",
   name: SITE_NAME,
-  url: SITE_URL + "/",
+  url: SITE_URL,
 });
 
-function headTags({ title, description, canonical, type = "website", image, robots, extra = "", ld = [] }) {
+function headTags({ title, description, canonical, type = "website", image = DEFAULT_IMAGE, robots, extra = "", ld = [] }) {
   const t = [];
   t.push("<title>" + esc(title) + "</title>");
   t.push('<meta name="description" content="' + esc(description) + '" />');
@@ -247,6 +255,11 @@ function headTags({ title, description, canonical, type = "website", image, robo
   t.push('<meta property="og:title" content="' + esc(title) + '" />');
   t.push('<meta property="og:description" content="' + esc(description) + '" />');
   if (image) t.push('<meta property="og:image" content="' + esc(image) + '" />');
+  if (image === DEFAULT_IMAGE) {
+    t.push('<meta property="og:image:width" content="' + DEFAULT_IMAGE_W + '" />');
+    t.push('<meta property="og:image:height" content="' + DEFAULT_IMAGE_H + '" />');
+    t.push('<meta property="og:image:alt" content="News30 — the day\'s news in 30 seconds" />');
+  }
   t.push('<meta name="twitter:card" content="' + (image ? "summary_large_image" : "summary") + '" />');
   t.push('<meta name="twitter:title" content="' + esc(title) + '" />');
   t.push('<meta name="twitter:description" content="' + esc(description) + '" />');
@@ -339,6 +352,7 @@ async function homePage(req, res) {
             url: SITE_URL + "/",
             description: HOME_DESCRIPTION,
             publisher: { "@id": SITE_URL + "/#organization" },
+            image: DEFAULT_IMAGE,
             inLanguage: "en",
           },
           orgLd(),
@@ -421,9 +435,9 @@ function storyRequest(req) {
   for (const v of [].concat(q)) candidates.push(safeDecode(String(v)));
   for (const c of candidates) {
     const uuid = uuidFromSlug(c);
-    if (uuid) return { segment: c.replace(/\/+$/, ""), uuid, candidates };
+    if (uuid) return { segment: c.replace(/\/+$/, ""), uuid };
   }
-  return { segment: candidates[0] || "", uuid: null, candidates };
+  return { segment: candidates[0] || "", uuid: null };
 }
 
 /* Row by id. status is checked in code, not in the query, so the logs can
@@ -434,11 +448,9 @@ function storyRequest(req) {
 async function findStory(uuid) {
   const query = "select=" + STORY_COLS + ",status&id=eq." + uuid + "&limit=1";
   let rows = await sbSelect(query);
-  console.log("[seo] story lookup:", JSON.stringify({ uuid, rows: rows.length, status: rows[0] && rows[0].status }));
   const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!rows.length && service && service !== supabaseConfig().key) {
     rows = await sbSelect(query, { key: service });
-    console.log("[seo] story lookup (service key):", JSON.stringify({ uuid, rows: rows.length, status: rows[0] && rows[0].status }));
   }
   const row = rows[0];
   if (row && row.status !== "ready") {
@@ -449,9 +461,7 @@ async function findStory(uuid) {
 }
 
 async function storyPage(req, res) {
-  const { segment, uuid, candidates } = storyRequest(req);
-  // TEMP: diagnosing story 404s on Vercel — remove once confirmed fixed.
-  console.log("[seo] story request:", JSON.stringify({ url: req.url, querySlug: req.query && req.query.slug, candidates, segment, uuid }));
+  const { segment, uuid } = storyRequest(req);
   if (!uuid) return notFound(req, res);
 
   let row, related = [];
@@ -483,7 +493,8 @@ async function storyPage(req, res) {
   const src = sourceName(row.source);
   const articleUrl = safeHttpUrl(row.article_url);
   const videoUrl = safeHttpUrl(row.video_url);
-  const image = liveThumb(row);
+  const image = liveThumb(row);       // real thumbnail, or null once expired
+  const metaImage = image || DEFAULT_IMAGE;
   const script = String(row.script || "").trim();
   const words = wordCount(script);
   const thin = words < THIN_WORDS;
@@ -506,9 +517,9 @@ async function storyPage(req, res) {
     inLanguage: "en",
     datePublished: published || undefined,
     dateModified: published || undefined,
-    author: { "@id": SITE_URL + "/#organization" },
-    publisher: { "@id": SITE_URL + "/#organization" },
-    image: image ? [image] : undefined,
+    author: orgLd(),
+    publisher: orgLd(),
+    image: [metaImage],
     articleBody: script || undefined,
     wordCount: words || undefined,
     isBasedOn: articleUrl || undefined,
@@ -521,7 +532,7 @@ async function storyPage(req, res) {
       "@id": canonical + "#video",
       name: row.headline || "News story",
       description,
-      thumbnailUrl: image ? [image] : undefined,
+      thumbnailUrl: [metaImage],
       uploadDate: published || undefined,
       duration: isoDuration(row.duration_seconds),
       contentUrl: videoUrl,
@@ -538,7 +549,7 @@ async function storyPage(req, res) {
     description,
     canonical,
     type: "article",
-    image,
+    image: metaImage,
     robots: thin ? "noindex, follow" : "max-image-preview:large",
     extra: [
       published ? '<meta property="article:published_time" content="' + published + '" />' : "",
