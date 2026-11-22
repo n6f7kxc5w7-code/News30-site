@@ -1418,6 +1418,7 @@ const CSS2 = `
 .sugg button{border:1px solid var(--line);border-radius:999px;padding:8px 15px;font-size:13.5px;color:#ddd;transition:background .13s,border-color .13s}
 .sugg button:hover{background:var(--raised);border-color:transparent}
 .aiv .chat{padding:4px 2px}
+.aiv-scroll{display:flex;flex-direction:column;gap:16px}
 .aiv-in{position:sticky;bottom:14px;margin-top:auto;background:var(--bg);padding-top:8px}
 .smp{max-width:760px;margin:0 auto;padding:26px 0;display:flex;flex-direction:column;gap:14px}
 .smp textarea{width:100%;min-height:190px;background:var(--bg2);border:1px solid #303030;border-radius:14px;padding:15px;font-size:14px;line-height:1.6;resize:vertical;transition:border-color .15s}
@@ -1518,6 +1519,15 @@ const CSS2 = `
   .aiv{padding:16px 0}
   .aiv-hero{padding:20px 0 4px}
   .aiv-hero h2{font-size:22px}
+  /* Ask AI page with the keyboard up: fixed column pinned to the visual
+     viewport by useVisualViewportBox (header room on top, messages scroll,
+     input on the keyboard); tab bar hidden. */
+  body.kb-open .bnav{display:none}
+  .page.aiv-kb{position:fixed;inset:0;z-index:59;background:var(--bg);padding:0;overflow:hidden}
+  .page.aiv-kb .aiv{position:absolute;left:0;right:0;top:0;height:100%;min-height:0;max-width:none;margin:0;padding:var(--hd-h) 12px 0;gap:0}
+  .page.aiv-kb .aiv-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 0}
+  .page.aiv-kb .aiv-in{position:static;margin:0;padding:8px 0}
+  .page.aiv-kb .chat-hint{display:none}
   .toasts{bottom:76px}
 }
 `;
@@ -2327,12 +2337,88 @@ const SUGGESTIONS = [
   "Explain the Fed's latest signal simply",
 ];
 
+/* Pins an element to the visual viewport while `active`: height =
+   visualViewport.height, translateY(visualViewport.offsetTop), written
+   straight to the DOM on every vv resize AND scroll so it never lags Safari.
+   `followers` (e.g. the header) get the same translate. If the window
+   scrolls, it is put back to 0. onResize fires when the height changes
+   (keyboard opened/closed). Used by the mobile Ask AI chat and Ask AI page. */
+function useVisualViewportBox(ref, active, onResize, getFollowers) {
+  const cb = React.useRef(onResize);
+  cb.current = onResize;
+  React.useLayoutEffect(() => {
+    if (!active) return;
+    const el = ref.current;
+    if (!el) return;
+    const vv = window.visualViewport;
+    const followers = getFollowers ? getFollowers().filter(Boolean) : [];
+    let lastH = -1;
+    const sync = () => {
+      const h = vv ? vv.height : window.innerHeight;
+      const t = vv ? vv.offsetTop : 0;
+      el.style.height = h + "px";
+      el.style.transform = "translateY(" + t + "px)";
+      followers.forEach((f) => { f.style.transform = "translateY(" + t + "px)"; });
+      if (h !== lastH) { lastH = h; if (cb.current) cb.current(); }
+    };
+    const onWinScroll = () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); sync(); };
+    sync();
+    if (vv) { vv.addEventListener("resize", sync); vv.addEventListener("scroll", sync); }
+    window.addEventListener("scroll", onWinScroll);
+    return () => {
+      if (vv) { vv.removeEventListener("resize", sync); vv.removeEventListener("scroll", sync); }
+      window.removeEventListener("scroll", onWinScroll);
+      el.style.height = ""; el.style.transform = "";
+      followers.forEach((f) => { f.style.transform = ""; });
+    };
+  }, [active]);
+}
+
 function AskAIView({ thread, busy, onAsk }) {
   const [draft, setDraft] = React.useState("");
+  const mobile = useIsMobile();
+  /* Mobile + input focused (keyboard up): the page becomes a fixed column
+     pinned to the visual viewport — header on top, messages scrolling in
+     the middle, input right on the keyboard — and the tab bar hides. The
+     same input element stays mounted, so focus/keyboard are never lost. */
+  const [kb, setKb] = React.useState(false);
   const endRef = React.useRef(null);
+  const boxRef = React.useRef(null);
+  const scrollRef = React.useRef(null);
+  const savedRef = React.useRef({ y: 0, n: 0 });
+
+  const toBottom = React.useCallback(() => {
+    const sc = scrollRef.current;
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  }, []);
   React.useEffect(() => {
-    if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (kb) toBottom();
+    else if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [thread, busy]);
+
+  useVisualViewportBox(boxRef, kb, toBottom, () => [document.querySelector(".hd")]);
+
+  React.useEffect(() => {
+    document.body.classList.toggle("kb-open", kb);
+    if (kb) return () => document.body.classList.remove("kb-open");
+  }, [kb]);
+
+  const onFocus = () => {
+    if (!mobile) return;
+    savedRef.current = { y: window.scrollY, n: thread.length };
+    setKb(true);
+  };
+  const onBlur = () => {
+    if (!kb) return;
+    setKb(false);
+    // Back to how it was; if new messages arrived meanwhile, show the newest.
+    const { y, n } = savedRef.current;
+    requestAnimationFrame(() => {
+      if (thread.length !== n && endRef.current) endRef.current.scrollIntoView({ block: "end" });
+      else window.scrollTo(0, y);
+    });
+  };
+
   const send = () => {
     const q = draft.trim();
     if (!q || busy) return;
@@ -2340,26 +2426,28 @@ function AskAIView({ thread, busy, onAsk }) {
     onAsk(q);
   };
   return (
-    <div className="page">
-      <div className="aiv">
-        {thread.length === 0 && (
-          <div className="aiv-hero">
-            <div className="aiv-glow"><Icon name="sparkle" size={28} /></div>
-            <h2>Ask AI anything</h2>
-            <p>Live answers about geopolitics, finance and sport — grounded in today's news, with web search when it helps.</p>
-            <div className="sugg">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => onAsk(s)}>{s}</button>
-              ))}
+    <div className={cls("page", kb && "aiv-kb")}>
+      <div className="aiv" ref={boxRef}>
+        <div className="aiv-scroll" ref={scrollRef}>
+          {thread.length === 0 && (
+            <div className="aiv-hero">
+              <div className="aiv-glow"><Icon name="sparkle" size={28} /></div>
+              <h2>Ask AI anything</h2>
+              <p>Live answers about geopolitics, finance and sport — grounded in today's news, with web search when it helps.</p>
+              <div className="sugg">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s} onPointerDown={keepFocus} onClick={() => onAsk(s)}>{s}</button>
+                ))}
+              </div>
             </div>
+          )}
+          <div className="chat">
+            {thread.map((m, i) => (
+              <div key={i} className={cls("msg", m.role === "user" ? "user" : "ai")}>{m.text}</div>
+            ))}
+            {busy && <div className="typing"><i /><i /><i /></div>}
+            <div ref={endRef} />
           </div>
-        )}
-        <div className="chat">
-          {thread.map((m, i) => (
-            <div key={i} className={cls("msg", m.role === "user" ? "user" : "ai")}>{m.text}</div>
-          ))}
-          {busy && <div className="typing"><i /><i /><i /></div>}
-          <div ref={endRef} />
         </div>
         <div className="aiv-in">
           <div className="ask-in">
@@ -2367,10 +2455,13 @@ function AskAIView({ thread, busy, onAsk }) {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              onFocus={onFocus}
+              onBlur={onBlur}
               placeholder="Ask about any story or topic…"
               aria-label="Ask AI"
+              enterKeyHint="send"
             />
-            <button className="send" onClick={send} disabled={!draft.trim() || busy} aria-label="Send">
+            <button className="send" onPointerDown={keepFocus} onClick={send} disabled={!draft.trim() || busy} aria-label="Send">
               <Icon name="send" size={17} />
             </button>
           </div>
@@ -2716,30 +2807,8 @@ function AskChat({ story, thread, busy, draft, setDraft, ask, inputRef, onClose 
      arrives (thread/busy change)… */
   React.useEffect(() => { toBottom(); }, [thread, busy, toBottom]);
 
-  /* …and whenever the keyboard opens/closes. The column is written straight
-     to the DOM on every visualViewport resize AND scroll, so it never lags
-     behind Safari. If the window itself scrolls, put it back. */
-  React.useLayoutEffect(() => {
-    const vv = window.visualViewport;
-    const col = colRef.current;
-    let lastH = -1;
-    const sync = () => {
-      if (!col) return;
-      const h = vv ? vv.height : window.innerHeight;
-      const t = vv ? vv.offsetTop : 0;
-      col.style.height = h + "px";
-      col.style.transform = "translateY(" + t + "px)";
-      if (h !== lastH) { lastH = h; toBottom(); }
-    };
-    const onWinScroll = () => { if (window.scrollX || window.scrollY) window.scrollTo(0, 0); sync(); };
-    sync();
-    if (vv) { vv.addEventListener("resize", sync); vv.addEventListener("scroll", sync); }
-    window.addEventListener("scroll", onWinScroll);
-    return () => {
-      if (vv) { vv.removeEventListener("resize", sync); vv.removeEventListener("scroll", sync); }
-      window.removeEventListener("scroll", onWinScroll);
-    };
-  }, [toBottom]);
+  /* …and whenever the keyboard opens/closes. */
+  useVisualViewportBox(colRef, true, toBottom);
 
   return createPortal(
     <div className="achat" role="dialog" aria-label="Ask AI">
