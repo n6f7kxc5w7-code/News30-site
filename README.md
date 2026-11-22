@@ -57,6 +57,8 @@ browser  →  /api/ask-ai          →  Gemini
 | `PEXELS_API_KEY` | `generate-video.js` | Stock imagery |
 | `SUPABASE_SERVICE_ROLE_KEY` | all pipeline functions | Backend DB/storage writes — **full access, never expose** |
 | `PIPELINE_ENABLED` | `generate-audio.js`, `generate-video.js` | Kill switch. Set to `false` to halt all rendering instantly with no redeploy |
+| `GOOGLE_SITE_VERIFICATION` | `seo.js` | Optional. The `content` value of Google Search Console's HTML-tag verification; output as `<meta name="google-site-verification">` on the home page |
+| `SITE_URL` | `seo.js` | Optional. Canonical origin for canonical/OG URLs and the sitemap. Defaults to `https://news30.live` |
 
 **Client-side — public by design.**
 
@@ -95,10 +97,11 @@ All user activity (watches, likes, saves, quiz answers, login streaks) flows thr
 news30/
 ├── index.html                    Vite entry
 ├── package.json
-├── vercel.json                   Function config (incl. maxDuration)
+├── vercel.json                   Function config, SEO rewrites
 ├── vite.config.js
+├── scripts/rename-index.mjs      Post-build: dist/index.html → dist/app.html (see SEO)
 ├── public/
-│   └── test-pipeline.html        Manual pipeline test harness ⚠️ see note
+│   └── robots.txt
 ├── api/                          Vercel serverless functions (server-side only)
 │   ├── ask-ai.js                 Gemini proxy
 │   ├── news.js                   NewsAPI proxy
@@ -106,13 +109,21 @@ news30/
 │   ├── generate-video.js         Pexels + FFmpeg assembly
 │   ├── job-status.js             Pipeline job polling
 │   ├── video-webhook.js
+│   ├── seo.js                    Server-rendered /, /story/*, category pages, /sitemap.xml
 │   └── LiberationSans-Bold.ttf   Bundled font — Vercel has no system fonts
 └── src/
-    ├── main.jsx                  React mount
+    ├── main.jsx                  React mount (+ legacy #/story redirect)
+    ├── slug.js                   Story URL slugs, shared with api/seo.js
     └── App.jsx                   The entire app (UI, data, services, styles)
 ```
 
-⚠️ **`public/test-pipeline.html` is publicly reachable** at `/test-pipeline.html` on the deployed site. Anyone who finds that URL can trigger renders that cost real money. Delete it or put it behind a check before any public launch.
+### SEO
+
+Story pages live at `/story/<slug>-<uuid>`. `vercel.json` rewrites `/`, `/story/*`, `/geopolitics`, `/finance`, `/sports` and `/sitemap.xml` to the single function `api/seo.js`, which returns the built app shell with a per-page `<head>` (title, description, canonical, Open Graph/Twitter, JSON-LD) and the page's text as real HTML inside `#root`, which React replaces on mount. Vercel serves static files before rewrites, so the build renames `dist/index.html` to `dist/app.html`; the function fetches that file as its template. Keep the `<!-- seo:start -->` / `<!-- seo:end -->` markers in `index.html`.
+
+- `NewsArticle` JSON-LD always; `VideoObject` only while `video_url` is set (the cleanup cron nulls it after 3 days). Story pages stay up afterwards, and `main.jsx` leaves the server-rendered transcript in place instead of mounting the feed.
+- Stories with a script under 40 words are `noindex` and left out of the sitemap.
+- Old `#/story/pub-<uuid>` links redirect client-side to `/story/<uuid>`, which the server 301s to the canonical slug URL.
 
 ---
 
@@ -184,4 +195,3 @@ This project has a target ceiling of roughly £50/month. The costs that can run 
 - Set hard spend caps in the Fish Audio and Pexels dashboards, and budget alerts in Google Cloud.
 - `PIPELINE_ENABLED=false` halts all generation immediately without a redeploy.
 - Both pipeline endpoints restrict CORS to known origins so other sites cannot spend your quota.
-- `test-pipeline.html` should be removed before launch (see above).

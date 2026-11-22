@@ -139,7 +139,7 @@ console.log(data, error);
 
 **2. Signed-in access still works.** Sign in, then reload. Quiz results and login streaks should persist as before. If they silently stop saving, a policy is too strict — check the browser console for Supabase errors rather than assuming the feature broke.
 
-**3. The pipeline still works.** Run a render through `test-pipeline.html`. It uses `service_role` server-side, so it should be entirely unaffected. If it breaks, the wrong key is being used somewhere in `api/`.
+**3. The pipeline still works.** Let the cron run a render (or trigger `/api/cron/process`). It uses `service_role` server-side, so it should be entirely unaffected. If it breaks, the wrong key is being used somewhere in `api/`.
 
 **4. Public video reads still work.** Signed out, confirm finished videos still load.
 
@@ -147,6 +147,5 @@ console.log(data, error);
 
 ## Still outstanding
 
-- **`public/test-pipeline.html` is world-reachable** at `/test-pipeline.html`. It calls `/api/generate-audio` and `/api/generate-video`, both of which cost real money per invocation. CORS restricts *browser* calls from other origins, but not direct requests, and not someone simply visiting the page. Delete it or gate it before launch.
 - **No rate limiting** on the pipeline endpoints. A loop or a bored visitor can run up a bill within the £50/month ceiling faster than expected. `PIPELINE_ENABLED=false` is the emergency stop, but it is manual.
 - **Google OAuth client** is disabled while the Cloud project is suspended, which takes sign-in down with it. Worth adding magic-link or email/password auth via Supabase as a fallback so a single Google outage doesn't remove all authentication.

@@ -1,9 +1,27 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { inject } from "@vercel/analytics";
 import App from "./App.jsx";
 
-createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+/* Legacy share links were #/story/pub-<uuid>. The fragment never reaches
+   the server, so hop to /story/<uuid>; api/seo.js 301s that to the
+   canonical /story/<slug>-<uuid>. */
+const legacy = window.location.hash.match(
+  /^#\/story\/(?:pub-)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
 );
+const rootEl = document.getElementById("root");
+
+if (legacy) {
+  window.location.replace("/story/" + legacy[1].toLowerCase());
+} else if (rootEl.dataset.story && rootEl.dataset.video === "0") {
+  /* Story whose video has been deleted (videos expire after 3 days): the
+     server-rendered article + transcript IS the page, so don't mount the
+     video feed over it. Page-view analytics still run. */
+  inject();
+} else {
+  createRoot(rootEl).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}

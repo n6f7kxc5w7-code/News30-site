@@ -16,6 +16,40 @@
     },
     "api/cron/ingest.js": {
       "maxDuration": 30
+    },
+    "api/seo.js": {
+      "maxDuration": 30
     }
-  }
+  },
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/api/seo?page=home"
+    },
+    {
+      "source": "/sitemap.xml",
+      "destination": "/api/seo?page=sitemap"
+    },
+    {
+      "source": "/story/:slug",
+      "destination": "/api/seo?page=story&slug=:slug"
+    },
+    {
+      "source": "/:cat(geopolitics|finance|sports)",
+      "destination": "/api/seo?page=category&cat=:cat"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/app.html",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex"
+        }
+      ]
+    }
+  ]
 }

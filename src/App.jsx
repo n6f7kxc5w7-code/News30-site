@@ -18,6 +18,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } 
 import { createPortal, flushSync } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 import { Analytics } from '@vercel/analytics/react';
+import { storyPath, uuidFromSlug } from "./slug.js";
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
@@ -681,6 +682,20 @@ const storiesService = {
     }
   },
 };
+/* Public, crawlable URL for a story: /story/<slug>-<uuid> (server-rendered
+   by api/seo.js). Non-pipeline stories have no page of their own. */
+const storyShareUrl = (story) => {
+  const id = String(story && story.id);
+  return window.location.origin + (id.startsWith("pub-") ? storyPath(id.slice(4), story.headline) : "/");
+};
+/* The story a /story/<slug>-<uuid> path points at, as a "pub-" id. */
+const storyIdFromPath = () => {
+  const m = window.location.pathname.match(/^\/story\/([^/]+)\/?$/);
+  const uuid = m && uuidFromSlug(m[1]);
+  return uuid ? "pub-" + uuid : null;
+};
+const HOME_TITLE = "News30 — AI-condensed news in 30 seconds";
+
 /* One story by id, for shared links to stories older than the newest
    200 (or opened before the feed finished loading). */
 storiesService.loadOne = async (storyId) => {
@@ -3334,7 +3349,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
   };
 
   const doShare = async () => {
-    const url = window.location.origin + window.location.pathname + "#/story/" + story.id;
+    const url = storyShareUrl(story);
     const ok = await copyText(url);
     toast(ok ? "Link copied" : url, "share");
   };
@@ -3487,7 +3502,10 @@ function App() {
   const mobile = vw < 768;
   const canFull = vw >= 1100;
   const [view, setView] = React.useState("home");
-  const [category, setCategory] = React.useState("all");
+  const [category, setCategory] = React.useState(() => {
+    const m = window.location.pathname.match(/^\/(geopolitics|finance|sports)\/?$/);
+    return m ? m[1] : "all";
+  });
   const [sbFull, setSbFull] = React.useState(true);   // desktop full vs mini
   const [drawer, setDrawer] = React.useState(false);  // mobile / mid overlay
 
@@ -3531,18 +3549,18 @@ function App() {
     if (!fav) { fav = document.createElement("link"); fav.rel = "icon"; document.head.appendChild(fav); }
     if (FAVICON_SRC) fav.href = FAVICON_SRC;
 
-    const prevTitle = document.title;
-    document.title = "News30 — AI news in 30 seconds";
+    /* <title> comes from the server (api/seo.js) per page — story pages
+       keep their headline title rather than a generic one. */
 
     // 🔌 SHARE deep-link: handled in the LIVE NEWS effect below, once
     // the stories have actually loaded.
-    return () => { document.head.removeChild(style); document.title = prevTitle; };
+    return () => { document.head.removeChild(style); };
   }, []);
 
   /* 🔌 LIVE NEWS: real pipeline videos only. No NewsAPI headline
      fallback, no sample stories, no fake "breaking news" demo. The
      version always bumps so the feed can swap skeletons for either the
-     videos or the "being made" message. Shared links (#/story/pub-…)
+     videos or the "being made" message. Shared links (/story/<slug>-<uuid>)
      open once the data is here, fetching the story directly if it isn't
      in the newest batch. */
   const [newsVersion, setNewsVersion] = React.useState(0);
@@ -3554,9 +3572,9 @@ function App() {
       if (cancelled) return;
       setNewsVersion((v) => v + 1);
 
-      const m = window.location.hash.match(/#\/story\/([\w-]+)/);
-      if (m) {
-        const s = LIVE_CACHE.get(m[1]) || (await storiesService.loadOne(m[1]));
+      const deepId = storyIdFromPath();
+      if (deepId) {
+        const s = LIVE_CACHE.get(deepId) || (await storiesService.loadOne(deepId));
         if (!cancelled && s) setPlayer({ list: [s], index: 0 });
       }
     })();
@@ -3753,7 +3771,14 @@ is restored when the player closes. */
           list={player.list}
           index={player.index}
           onNavIndex={(i) => setPlayer((p) => ({ ...p, index: i }))}
-          onClose={() => setPlayer(null)}
+          onClose={() => {
+            setPlayer(null);
+            /* Leaving a deep-linked story: drop its URL so a refresh lands on the feed. */
+            if (window.location.pathname.startsWith("/story/")) {
+              window.history.replaceState(null, "", "/");
+              document.title = HOME_TITLE;
+            }
+          }}
           user={user}
           userData={userData}
           dispatch={dispatchTracked}
@@ -3788,7 +3813,7 @@ is restored when the player closes. */
               {saved.includes(cardMenu.story.id) ? "Remove from Saved" : "Save story"}
             </button>
             <button onClick={async () => {
-              const url = window.location.origin + window.location.pathname + "#/story/" + cardMenu.story.id;
+              const url = storyShareUrl(cardMenu.story);
               const ok = await copyText(url); setCardMenu(null); toast(ok ? "Link copied" : url, "share");
             }}>
               <Icon name="share" size={19} /> Copy link

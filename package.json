@@ -3,10 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "News30 — AI-condensed news in 30 seconds. Pre-alpha web build.",
+  "description": "News30 \u2014 AI-condensed news in 30 seconds. Pre-alpha web build.",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/rename-index.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
