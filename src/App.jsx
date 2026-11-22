@@ -15,6 +15,7 @@
    ════════════════════════════════════════════════════════════════════ */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer } from "react";
+import { createPortal, flushSync } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 import { Analytics } from '@vercel/analytics/react';
 
@@ -1330,9 +1331,21 @@ const CSS2 = `
 .pnl-h h3{font-size:16px;font-weight:600;flex:1;display:flex;align-items:center;gap:9px}
 .pnl-h .ibtn{width:38px;height:38px}
 .pnl-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
-.pnl-chips{display:none;gap:8px;overflow-x:auto;padding:8px 0;margin:0 -12px;padding-left:12px;padding-right:12px;scrollbar-width:none}
-.pnl-chips::-webkit-scrollbar{display:none}
-.pnl-chips button{flex:none;border:0;border-radius:999px;background:var(--raised,#303030);color:inherit;font:inherit;font-size:14px;padding:8px 14px;white-space:nowrap;cursor:pointer}
+/* Full-screen Ask AI chat (mobile). A fixed box sized to the visual
+   viewport: iOS shrinks the visual viewport for the keyboard, so the
+   input bar at the bottom of this box sits on the keyboard natively. */
+.achat{position:fixed;left:0;right:0;top:var(--vvt,0px);height:var(--vvh,100%);z-index:90;background:var(--bg);display:flex;flex-direction:column;overscroll-behavior:contain;animation:fade .15s}
+.achat-h{flex:none;display:flex;align-items:center;gap:10px;padding:8px 6px 8px 16px;border-bottom:1px solid var(--line2)}
+.achat-h h3{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.achat-h .ibtn{flex:none;width:44px;height:44px}
+.achat-body{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:16px}
+.achat-empty{color:var(--txt2);font-size:14px;text-align:center;padding:24px 8px}
+.achat-foot{flex:none;padding:6px 12px 8px;border-top:1px solid var(--line2);background:var(--bg)}
+.achat-chips{display:flex;gap:8px;overflow-x:auto;margin:0 -12px 8px;padding:2px 12px;scrollbar-width:none}
+.achat-chips::-webkit-scrollbar{display:none}
+.achat-chips button{flex:none;border:0;border-radius:999px;background:var(--raised);color:inherit;font:inherit;font-size:14px;padding:8px 14px;white-space:nowrap;cursor:pointer}
+.achat .ask-in input{font-size:16px}
+.ask-fake{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg2);border:1px solid #303030;border-radius:999px;padding:4px 4px 4px 15px;color:var(--txt2);font:inherit;font-size:16px;text-align:left;cursor:text}
 .pnl-foot{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:#212121}
 .tune{position:absolute;top:50px;right:54px;background:#2c2c2c;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;z-index:5;animation:pop .14s;width:190px}
 .tune button{display:flex;width:100%;padding:9px 15px;font-size:13.5px;gap:10px;align-items:center;text-align:left}
@@ -1485,30 +1498,16 @@ const CSS2 = `
   .pl-info{right:70px;bottom:22px}
   .pl-nav{display:none}
   .pl-close{left:10px;top:10px}
-  /* YouTube-style sheet. --sheet-top is the line between video and sheet,
-     from the top of the layout viewport (svh: Safari's toolbars-shown height,
-     which the keyboard never changes). It is fixed while the sheet is open and is
-     chosen so that, with Safari's keyboard + accessory bar up (~340px) and
-     the floating input bar + chips (~100px) on top of it, the NEWS30 bar,
-     the video and the sheet's header row stay fully visible and a line of
-     summary still shows (dimmed). Opening the keyboard moves and resizes
-     nothing: it just covers the lower part of the sheet. Everything is
-     offset by visualViewport.offsetTop (--vvt) so an iOS pan to the focused
-     input never visibly moves anything. */
-  .player{--sheet-top:clamp(calc(var(--hd-h) + 96px),calc(100svh - 525px),45svh);top:calc(var(--hd-h) + var(--vvt,0px));bottom:calc(0px - var(--vvt,0px))}
-  body.no-scroll .hd{transform:translateY(var(--vvt,0px))}
+  /* Sheet layout: video in a 16:9-ish box at the top (keeps playing, tap
+     to pause), panel as a bottom sheet below. The panel never takes the
+     keyboard on mobile: its input is a button that opens the full-screen
+     Ask AI chat (.achat). */
+  .player{--sheet-top:min(calc(var(--hd-h) + 56.25vw),45svh)}
   .player.panel-open{align-items:flex-start}
   .player.panel-open .pl-stage{height:calc(var(--sheet-top) - var(--hd-h))}
   .player.panel-open .pl-vid{object-fit:contain}
   .player.panel-open .pl-rail,.player.panel-open .pl-info,.player.panel-open .pl-grad,.player.panel-open .pl-topline{display:none}
-  .pnl{position:fixed;left:0;right:0;bottom:auto;top:calc(var(--vvt,0px) + var(--sheet-top));height:calc(100% - var(--sheet-top));width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
-  /* Typing: the sheet stays exactly as it is, dimmed; only the input bar
-     (+ chips) floats with its bottom on the bottom of the visual viewport,
-     i.e. directly on top of the keyboard. Dim has pointer-events:none so
-     X stays tappable. */
-  .pnl.typing::after{content:"";position:absolute;inset:0;background:rgba(0,0,0,.5);pointer-events:none;z-index:4}
-  .pnl.typing .pnl-foot{position:fixed;left:0;right:0;top:calc(var(--vvt,0px) + var(--vvh,100%));transform:translateY(-100%);z-index:5;padding:8px 12px 0;border-top:0}
-  .pnl.typing .pnl-chips{display:flex;padding:6px 12px 8px}
+  .pnl{top:var(--sheet-top);bottom:0;left:0;right:0;position:fixed;width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -2671,42 +2670,88 @@ function getQuiz(story) {
 
 /* ══════ 11 · SLIDE PANELS — one shared shell for Summary & Quiz ═════ */
 
-function SlidePanel({ title, icon, headerExtra, footer, footerChips, onClose, children }) {
-  /* true while a text field in the footer has focus (keyboard up on mobile) */
-  const [typing, setTyping] = React.useState(false);
-  const onFootFocus = (e) => { if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) setTyping(true); };
-  const onFootBlur = (e) => {
-    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return;
-    setTyping(false);
-  };
-  /* Touch: close on pointerdown so one tap works with the keyboard open
-     (otherwise the first tap is spent blurring the input). preventDefault
-     keeps focus from moving; the click that follows is swallowed so it
-     can't land on the video behind the now-closed panel. Mouse is
-     unchanged and still closes via onClick. */
-  /* While typing, a tap anywhere outside the input bar lowers the
-     keyboard (iOS doesn't reliably blur on taps on non-focusable areas). */
+/* Touch: close on pointerdown so one tap works even with the keyboard open
+   (otherwise the first tap is spent blurring the input). preventDefault
+   keeps focus from moving; the click that follows is swallowed so it can't
+   land on whatever is behind. Mouse is unchanged and closes via onClick. */
+function tapClose(e, close) {
+  if (e.pointerType === "mouse") return;
+  e.preventDefault();
+  const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+  document.addEventListener("click", swallow, true);
+  setTimeout(() => document.removeEventListener("click", swallow, true), 600);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  close();
+}
+
+const MOBILE_Q = "(max-width:767px)";
+function useIsMobile() {
+  const [m, setM] = React.useState(() => typeof window !== "undefined" && window.matchMedia(MOBILE_Q).matches);
   React.useEffect(() => {
-    const onDown = (e) => {
-      const a = document.activeElement;
-      if (!a || !a.closest || !a.closest(".pnl-foot")) return;
-      if (e.target.closest && e.target.closest(".pnl-foot")) return;
-      a.blur();
-    };
-    document.addEventListener("pointerdown", onDown, true);
-    return () => document.removeEventListener("pointerdown", onDown, true);
+    const mq = window.matchMedia(MOBILE_Q);
+    const on = () => setM(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
   }, []);
-  const closeOnTouch = (e) => {
-    if (e.pointerType === "mouse") return;
-    e.preventDefault();
-    const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
-    document.addEventListener("click", swallow, true);
-    setTimeout(() => document.removeEventListener("click", swallow, true), 600);
-    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-    onClose();
-  };
+  return m;
+}
+
+/* Full-screen Ask AI chat (mobile). Portalled to <body> and sized to the
+   visual viewport, so the keyboard simply shortens it and the input bar
+   rides on top of the keyboard; the page behind stays locked. */
+function AskChat({ story, thread, busy, draft, setDraft, ask, inputRef, onClose }) {
+  const bodyRef = React.useRef(null);
+  React.useEffect(() => {
+    const b = bodyRef.current;
+    if (b) b.scrollTop = b.scrollHeight;
+  }, [thread, busy]);
+  return createPortal(
+    <div className="achat" role="dialog" aria-label="Ask AI">
+      <div className="achat-h">
+        <h3>{story.headline}</h3>
+        <button className="ibtn" onPointerDown={(e) => tapClose(e, onClose)} onClick={onClose} aria-label="Close chat">
+          <Icon name="x" size={22} />
+        </button>
+      </div>
+      <div className="achat-body" ref={bodyRef}>
+        {thread.length === 0 && !busy && <div className="achat-empty">Ask anything about this story.</div>}
+        <div className="chat">
+          {thread.map((m, i) => (
+            <div key={i} className={cls("msg", m.role === "user" ? "user" : "ai")}>{m.text}</div>
+          ))}
+          {busy && <div className="typing"><i /><i /><i /></div>}
+        </div>
+      </div>
+      <div className="achat-foot">
+        <div className="achat-chips">
+          {ASK_CHIPS.map((c) => (
+            <button key={c} onPointerDown={keepFocus} onClick={() => ask(c)}>{c}</button>
+          ))}
+        </div>
+        <div className="ask-in">
+          <input
+            ref={inputRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") ask(draft); }}
+            placeholder="Ask AI about this story…"
+            aria-label="Ask about this story"
+            enterKeyHint="send"
+          />
+          <button className="send" onPointerDown={keepFocus} onClick={() => ask(draft)} disabled={!draft.trim() || busy} aria-label="Send">
+            <Icon name="send" size={16} />
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
+  const closeOnTouch = (e) => tapClose(e, onClose);
   return (
-    <div className={cls("pnl", typing && "typing")} role="dialog" aria-label={title}>
+    <div className="pnl" role="dialog" aria-label={title}>
       <div className="pnl-h">
         <h3><Icon name={icon} size={19} /> {title}</h3>
         {headerExtra}
@@ -2715,7 +2760,7 @@ function SlidePanel({ title, icon, headerExtra, footer, footerChips, onClose, ch
         </button>
       </div>
       <div className="pnl-body">{children}</div>
-      {footer && <div className="pnl-foot" onFocus={onFootFocus} onBlur={onFootBlur}>{footer}{footerChips && <div className="pnl-chips">{footerChips}</div>}</div>}
+      {footer && <div className="pnl-foot">{footer}</div>}
     </div>
   );
 }
@@ -2726,13 +2771,29 @@ const SUMMARY_MODES = [
   { id: "detailed", label: "More detail", icon: "search" },
 ];
 
-/* Suggestion chips shown above the keyboard while typing (mobile). */
+/* Suggestion chips in the mobile Ask AI chat, above the input bar. */
 const ASK_CHIPS = ["Explain simply", "Why does it matter?", "What happens next?", "Who's involved?"];
 /* Touch: don't let a tap on send/chips blur the input first — that would
    drop the keyboard and move the button out from under the finger. */
 const keepFocus = (e) => { if (e.pointerType !== "mouse") e.preventDefault(); };
 
-function SummaryPanel({ story, onClose }) {
+function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
+  const mobile = useIsMobile();
+  const [chatOpen, setChatOpen] = React.useState(false);
+  const chatInputRef = React.useRef(null);
+  /* Mount the chat synchronously inside the tap, then focus its input in
+     the same gesture — iOS only raises the keyboard for a focus() made
+     during a user gesture. */
+  const openChat = () => {
+    flushSync(() => setChatOpen(true));
+    if (chatInputRef.current) chatInputRef.current.focus();
+    if (onChatOpen) onChatOpen();
+  };
+  const closeChat = () => {
+    setChatOpen(false);
+    if (onChatClose) onChatClose();
+  };
+  React.useEffect(() => { if (!mobile && chatOpen) closeChat(); }, [mobile]);
   const [mode, setMode] = React.useState("standard");
   const [tuneOpen, setTuneOpen] = React.useState(false);
   const [regen, setRegen] = React.useState(false);
@@ -2764,8 +2825,6 @@ function SummaryPanel({ story, onClose }) {
     const q = qRaw.trim();
     if (!q || busy) return;
     setDraft("");
-    // Mobile: lower the keyboard so the answer is visible in the sheet.
-    if (window.matchMedia("(max-width:767px)").matches && document.activeElement) document.activeElement.blur();
     const next = [...thread, { role: "user", text: q }];
     setThread(next);
     setBusy(true);
@@ -2787,7 +2846,12 @@ function SummaryPanel({ story, onClose }) {
           <Icon name="tune" size={19} />
         </button>
       }
-      footer={
+      footer={mobile ? (
+        <button className="ask-fake" onClick={openChat} aria-label="Ask AI about this story">
+          Ask AI about this story…
+          <span className="send" aria-hidden="true"><Icon name="send" size={16} /></span>
+        </button>
+      ) : (
         <div className="ask-in">
           <input
             value={draft}
@@ -2800,10 +2864,8 @@ function SummaryPanel({ story, onClose }) {
             <Icon name="send" size={16} />
           </button>
         </div>
-      }
-      footerChips={ASK_CHIPS.map((c) => (
-        <button key={c} onPointerDown={keepFocus} onClick={() => ask(c)}>{c}</button>
-      ))}
+      )}
+
     >
       {tuneOpen && (
         <div className="tune">
@@ -2862,6 +2924,10 @@ function SummaryPanel({ story, onClose }) {
         </React.Fragment>
       )}
       <div ref={endRef} />
+      {chatOpen && (
+        <AskChat story={story} thread={thread} busy={busy} draft={draft} setDraft={setDraft}
+          ask={ask} inputRef={chatInputRef} onClose={closeChat} />
+      )}
     </SlidePanel>
   );
 }
@@ -3122,6 +3188,11 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     if (index > 0) { setDir(-1); onNavIndex(index - 1); }
   }, [index, onNavIndex]);
   const togglePlay = () => { setPlaying((p) => !p); setPpKey((k) => k + 1); };
+  /* Mobile Ask AI chat: pause while it's open, resume from the same spot
+     on close if it was playing before. */
+  const resumeRef = React.useRef(false);
+  const pauseForChat = () => { resumeRef.current = playing; setPlaying(false); };
+  const resumeAfterChat = () => { if (resumeRef.current) setPlaying(true); resumeRef.current = false; };
 
   React.useEffect(() => {
     const onKey = (e) => {
@@ -3283,7 +3354,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
         </button>
       </div>
 
-      {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} />}
+      {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} onChatOpen={pauseForChat} onChatClose={resumeAfterChat} />}
       {panel === "quiz" && quiz && quizUnlocked && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
     </div>
   );
@@ -3293,10 +3364,9 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 
 /* iOS Safari doesn't resize the layout viewport when the keyboard opens;
    it shrinks the visual viewport and scrolls it (offsetTop) to reveal the
-   focused field. The mobile panel is pinned straight to that visible
-   rectangle: --vvt = visualViewport.offsetTop, --vvh = visualViewport.height.
-   Written synchronously on every resize/scroll so the panel never lags a
-   frame behind Safari's own scroll-into-view while typing. */
+   focused field. The full-screen Ask AI chat (.achat) is sized to that
+   visible rectangle: --vvt = visualViewport.offsetTop,
+   --vvh = visualViewport.height, so its bottom is the top of the keyboard. */
 function useKeyboardInset() {
   React.useEffect(() => {
     const vv = window.visualViewport;
@@ -3306,27 +3376,12 @@ function useKeyboardInset() {
       root.setProperty("--vvt", vv.offsetTop + "px");
       root.setProperty("--vvh", vv.height + "px");
     };
-    /* Safari doesn't always fire visualViewport events mid-animation, so
-       while a text field has focus also re-sync every frame. */
-    let raf = 0;
-    const loop = () => {
-      sync();
-      const a = document.activeElement;
-      raf = a && /^(INPUT|TEXTAREA)$/.test(a.tagName) ? requestAnimationFrame(loop) : 0;
-    };
-    const onFocusIn = () => { if (!raf) raf = requestAnimationFrame(loop); };
-    const onFocusOut = () => setTimeout(sync, 0);
     vv.addEventListener("resize", sync);
     vv.addEventListener("scroll", sync);
-    document.addEventListener("focusin", onFocusIn);
-    document.addEventListener("focusout", onFocusOut);
     sync();
     return () => {
-      if (raf) cancelAnimationFrame(raf);
       vv.removeEventListener("resize", sync);
       vv.removeEventListener("scroll", sync);
-      document.removeEventListener("focusin", onFocusIn);
-      document.removeEventListener("focusout", onFocusOut);
       root.removeProperty("--vvt");
       root.removeProperty("--vvh");
     };
