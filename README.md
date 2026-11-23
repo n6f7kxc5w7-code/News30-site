@@ -122,7 +122,7 @@ news30/
 `scripts/upload.js` (run by `.github/workflows/upload.yml`) uploads finished stories as **private** drafts. Metadata comes from `scripts/youtube-metadata.js`:
 
 - **Title:** `youtube_title` (written by the script model: at most 60 characters, main name first, no outlet, no emoji). Falls back to the cleaned headline. Always ends in ` #Shorts`.
-- **Description:** a 1–2 sentence summary → `Full story, sources and a quiz: https://www.news30.live/story/<slug>-<uuid>` → the script → `Source:` outlet + article URL → `#News` plus 2 hashtags from the entities/category.
+- **Description:** a 1–2 sentence summary → `▶ Full story, sources and a quiz: <story URL>` → `Transcript:` + the script → `Source: AI-condensed summary of reporting by <outlet>.` + `Original article: <url>` → one line about News30 with https://www.news30.live → `#News` plus 2 hashtags from the entities/category. Kept under 4,900 characters (and 5,000 bytes); only the transcript is shortened.
 - **Tags:** entities + category + `news` (at most 10). **Category:** 17 (Sports) for sports, otherwise 25 (News & Politics). **Language:** `en`.
 
 These need a one-time migration. Until it runs, publishing and uploads still work, falling back to the headline and category:

@@ -10,7 +10,8 @@ const SITE_URL = "https://www.news30.live";
 // YouTube truncates hard at 100 characters and rejects < > outright.
 const TITLE_LIMIT = 100;
 const TITLE_SUFFIX = " #Shorts";
-const DESCRIPTION_LIMIT = 4900; // YouTube's limit is 5000 bytes; leave headroom
+const DESCRIPTION_LIMIT = 4900; // characters; YouTube's hard limit is 5000 bytes
+const DESCRIPTION_BYTES = 4990;
 const SUMMARY_LIMIT = 220;
 const MAX_TAGS = 10;
 const TAGS_CHAR_LIMIT = 450; // YouTube caps all tags together at 500
@@ -35,8 +36,10 @@ const stripUnsafe = (s) =>
     .replace(/[<>]/g, "")
     .replace(/[\p{Extended_Pictographic}‍️]/gu, "");
 
+// The outlet exactly as stored ("Reuters", "BBC News", "bbc.co.uk"):
+// stripping the TLD turned "bbc.co.uk" into a bare "bbc".
 const outletName = (story) => {
-  const src = String(story.source || "").replace(/\.(com|org|net|co\.uk)$/i, "").trim();
+  const src = String(story.source || "").trim();
   if (src) return src;
   try {
     return new URL(story.article_url).hostname.replace(/^www\./, "");
@@ -153,36 +156,71 @@ export function buildSummary(story) {
   if (lead && title && !summary.toLowerCase().includes(lead.toLowerCase())) {
     summary = title.replace(/[.\s]+$/, "") + ". " + sentences[0];
   }
-  return stripUnsafe(summary);
+  summary = stripUnsafe(summary);
+  // A script with no sentence punctuation is one giant "sentence".
+  if (summary.length > SUMMARY_LIMIT) {
+    const cut = summary.slice(0, SUMMARY_LIMIT - 1);
+    summary = cut.slice(0, cut.lastIndexOf(" ") > SUMMARY_LIMIT / 2 ? cut.lastIndexOf(" ") : cut.length).trimEnd() + "…";
+  }
+  return summary;
 }
 
 export function storyUrl(story) {
   return SITE_URL + storyPath(story.id, story.headline);
 }
 
+/* Description template — the same shape on every video:
+
+     <summary: 1–2 sentences, key names first — what search shows>
+
+     ▶ Full story, sources and a quiz: https://www.news30.live/story/<slug>-<uuid>
+
+     Transcript:
+     <script>
+
+     Source: AI-condensed summary of reporting by <Outlet>.
+     Original article: <article_url>
+
+     News30 — the day's news in 30 seconds, with the source credited on every story: https://www.news30.live
+
+     #News #Entity #Entity
+
+   One symbol (▶) marks the link so it stands out in the collapsed
+   description; no other emoji. */
+const ABOUT_LINE =
+  "News30 — the day's news in 30 seconds, with the source credited on every story: " + SITE_URL;
+
 export function buildDescription(story) {
-  const head = [buildSummary(story), "", "Full story, sources and a quiz: " + storyUrl(story)];
+  const head = [buildSummary(story), "", "▶ Full story, sources and a quiz: " + storyUrl(story)];
 
   // Attribution matters here: these are summaries of other newsrooms'
   // reporting, and saying so is both honest and the thing that keeps
   // this on the right side of a copyright complaint.
-  const tail = [];
-  const outlet = outletName(story);
-  if (outlet || story.article_url) {
-    tail.push("");
-    if (outlet) tail.push("Source: " + stripUnsafe(outlet));
-    if (story.article_url) tail.push(stripUnsafe(story.article_url));
-  }
-  tail.push("", buildHashtags(story).join(" "));
+  const outlet = stripUnsafe(outletName(story));
+  const articleUrl = stripUnsafe(story.article_url).trim();
+  const tail = [""];
+  if (outlet) tail.push("Source: AI-condensed summary of reporting by " + outlet + ".");
+  if (articleUrl) tail.push((outlet ? "" : "Source: ") + "Original article: " + articleUrl);
+  if (!outlet && !articleUrl) tail.pop();
+  tail.push("", ABOUT_LINE, "", buildHashtags(story).join(" "));
 
   // The script is the only part that gets cut if the whole thing is too
   // long, so the link, the source credit and the hashtags always survive.
-  const fixed = head.join("\n").length + tail.join("\n").length + 4;
-  let script = stripUnsafe(story.script).trim();
-  const room = DESCRIPTION_LIMIT - fixed;
-  if (script.length > room) script = room > 20 ? script.slice(0, room - 1).trimEnd() + "…" : "";
+  const transcriptLabel = ["", "Transcript:"];
+  const full = stripUnsafe(story.script).trim();
+  const assemble = (script) => [...head, ...(script ? [...transcriptLabel, script] : []), ...tail].join("\n");
+  const fits = (d) => d.length <= DESCRIPTION_LIMIT && Buffer.byteLength(d, "utf8") <= DESCRIPTION_BYTES;
 
-  return [...head, ...(script ? ["", script] : []), ...tail].join("\n");
+  let desc = assemble(full);
+  if (fits(desc)) return desc;
+  // Too long: binary-search the longest script prefix that fits.
+  let lo = 0, hi = full.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(assemble(full.slice(0, mid).trimEnd() + "…"))) lo = mid;
+    else hi = mid - 1;
+  }
+  return assemble(lo > 20 ? full.slice(0, lo).trimEnd() + "…" : "");
 }
 
 /* ───────────── snippet ───────────── */
