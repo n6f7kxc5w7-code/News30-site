@@ -117,6 +117,23 @@ news30/
     └── App.jsx                   The entire app (UI, data, services, styles)
 ```
 
+### YouTube uploads
+
+`scripts/upload.js` (run by `.github/workflows/upload.yml`) uploads finished stories as **private** drafts. Metadata comes from `scripts/youtube-metadata.js`:
+
+- **Title:** `youtube_title` (written by the script model: at most 60 characters, main name first, no outlet, no emoji). Falls back to the cleaned headline. Always ends in ` #Shorts`.
+- **Description:** a 1–2 sentence summary → `Full story, sources and a quiz: https://www.news30.live/story/<slug>-<uuid>` → the script → `Source:` outlet + article URL → `#News` plus 2 hashtags from the entities/category.
+- **Tags:** entities + category + `news` (at most 10). **Category:** 17 (Sports) for sports, otherwise 25 (News & Politics). **Language:** `en`.
+
+These need a one-time migration. Until it runs, publishing and uploads still work, falling back to the headline and category:
+
+```sql
+alter table video_jobs add column if not exists youtube_title text;
+alter table published_stories
+  add column if not exists youtube_title text,
+  add column if not exists entities jsonb;
+```
+
 ### SEO
 
 Story pages live at `/story/<slug>-<uuid>`. `vercel.json` rewrites `/`, `/story/*`, `/geopolitics`, `/finance`, `/sports` and `/sitemap.xml` to the single function `api/seo.js`, which returns the built app shell with a per-page `<head>` (title, description, canonical, Open Graph/Twitter, JSON-LD) and the page's text as real HTML inside `#root`, which React replaces on mount. Vercel serves static files before rewrites, so the build renames `dist/index.html` to `dist/app.html`; the function fetches that file as its template. Keep the `<!-- seo:start -->` / `<!-- seo:end -->` markers in `index.html`.

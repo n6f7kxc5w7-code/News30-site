@@ -42,6 +42,7 @@
 //           alter table published_stories add column if not exists description text;
 
 import { createClient } from "@supabase/supabase-js";
+import { updateWithOptional } from "../_optional-columns.js";
 
 const MAX_ATTEMPTS = 2;   // one retry, then leave it alone
 
@@ -210,11 +211,11 @@ export default async function handler(req, res) {
       // prompt wrote them when comparing retention later. Without it,
       // two weeks of output is indistinguishable and the comparison is
       // unrecoverable.
-      const { error: publishErr } = await supabase
-        .from("published_stories")
-        .update({
+      const { error: publishErr } = await updateWithOptional(supabase, "published_stories", story.id, {
           status: "ready",
           script: audioData.script,
+          youtube_title: audioData.youtubeTitle || null,
+          entities: (Array.isArray(audioData.entities) && audioData.entities.length) ? audioData.entities : null,
           script_prompt_version: audioData.scriptPromptVersion || null,
           image_queries: audioData.imageQueries || null,
           quiz: (audioData.quiz && audioData.quiz.length) ? audioData.quiz : null,
@@ -224,8 +225,7 @@ export default async function handler(req, res) {
           duration_seconds: videoData.durationSeconds || null,
           error: null,
           updated_at: new Date().toISOString(),
-        })
-        .eq("id", story.id);
+        }, ["youtube_title", "entities"]);
       // Without this check a failed publish left the row stuck at
       // "generating" with no error recorded.
       if (publishErr) throw new Error("publish update failed: " + publishErr.message);

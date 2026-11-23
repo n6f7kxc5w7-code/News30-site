@@ -180,6 +180,7 @@ import os from "os";
 import { fileURLToPath } from "url";
 import ffmpegPath from "ffmpeg-static";
 import { enforceRateLimit } from "./_rate-limit.js";
+import { updateWithOptional } from "./_optional-columns.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1409,22 +1410,23 @@ export default async function handler(req, res) {
        row, and a failure here is recoverable with the repair query. */
     if (job.story_id) {
       try {
-        const { error: pubErr } = await supabase
-          .from("published_stories")
-          .update({
-            status: "ready",
-            video_url: videoUrl,
-            thumbnail_url: thumbnailUrl,
-            audio_url: job.audio_url || null,
-            script: job.script || null,
-            image_queries: job.image_queries || null,
-            quiz: (Array.isArray(job.quiz) && job.quiz.length) ? job.quiz : null,
-            script_prompt_version: job.script_prompt_version || null,
-            duration_seconds: Number(realDuration.toFixed(2)),
-            error: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", job.story_id);
+        // youtube_title + entities feed scripts/upload.js (title, tags,
+        // hashtags). Optional: if not migrated yet, publishing still works.
+        const { error: pubErr } = await updateWithOptional(supabase, "published_stories", job.story_id, {
+          status: "ready",
+          video_url: videoUrl,
+          thumbnail_url: thumbnailUrl,
+          audio_url: job.audio_url || null,
+          script: job.script || null,
+          youtube_title: job.youtube_title || null,
+          entities: (Array.isArray(job.entities) && job.entities.length) ? job.entities : null,
+          image_queries: job.image_queries || null,
+          quiz: (Array.isArray(job.quiz) && job.quiz.length) ? job.quiz : null,
+          script_prompt_version: job.script_prompt_version || null,
+          duration_seconds: Number(realDuration.toFixed(2)),
+          error: null,
+          updated_at: new Date().toISOString(),
+        }, ["youtube_title", "entities"]);
         if (pubErr) {
           console.error("[generate-video] publish to story failed:", pubErr.message);
         } else {

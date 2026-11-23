@@ -66,6 +66,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { enforceRateLimit } from "./_rate-limit.js";
 import { geminiGenerate, geminiConfigured } from "./_gemini.js";
+import { updateWithOptional } from "./_optional-columns.js";
 
 const DEEPSEEK_MODEL = "deepseek-chat";
 const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
@@ -81,7 +82,8 @@ const MAX_TOKENS = 1400;
 //   v2 — hook rules added
 //   v3 — NewsAPI description passed in as source material
 //   v4 — quiz must hinge on narration-only details
-const SCRIPT_PROMPT_VERSION = 4;
+//   v5 — youtubeTitle added (SEO title for the YouTube upload)
+const SCRIPT_PROMPT_VERSION = 5;
 
 const ALLOWED_ORIGINS = [
   "https://news30.live",
@@ -97,7 +99,7 @@ const SCRIPT_PROMPT = `You write short vertical news videos.
 
 Return ONLY valid JSON. No markdown fences, no preamble, no trailing text.
 Exact shape:
-{"script":"...","imageQueries":["...","...","..."],"entities":["..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
+{"script":"...","youtubeTitle":"...","imageQueries":["...","...","..."],"entities":["..."],"quiz":[{"q":"...","opts":["...","...","...","..."],"correct":0}]}
 
 You are given a Headline and, usually, a Summary. The Summary is the
 outlet's own one-or-two-sentence account of the story and it is the
@@ -142,6 +144,27 @@ GOOD: "Canada's prime minister has been suspended."
 GOOD: "US debt has passed forty trillion dollars."
 BAD:  "In a stunning turn of events, the Canadian government has
        announced a major development regarding its leadership."
+
+youtubeTitle: the title of this video on YouTube, where people find it
+by searching. Rules:
+- Maximum 60 characters, including spaces.
+- Start with the main name or keyword someone would search for: the
+  person, team, company, country or thing the story is about. Then say
+  plainly what happened. "Arsenal held 2–2 by Newcastle", not
+  "Newcastle hold Arsenal in thriller".
+- Factual and true to the source. It must not claim more than the
+  script does.
+- No clickbait: no questions, no "you won't believe", no "here's why",
+  no hype words like "shocking" or "massive", no ALL CAPS.
+- No emoji, no hashtags, no quotation marks, no trailing full stop.
+- Never include the name of the outlet that reported it.
+- Titles are read, not spoken: use digits for scores and figures
+  ("2–2", "2.4%", "$40 trillion").
+
+GOOD: "Jannik Sinner withdraws from US Open with knee injury"
+GOOD: "US debt passes $40 trillion"
+BAD:  "SHOCKING: Star pulls out of major tournament?! 😱"
+BAD:  "Reuters: Arsenal and Newcastle draw"
 
 imageQueries: exactly 3 stock-photo search phrases that visually
 represent this story on Pexels. Rules:
@@ -202,7 +225,7 @@ framework covering a forty-day truce and staged humanitarian access,
 though neither delegation has signed."
 Note how the script uses the forty days and the phasing, which the
 headline alone does not give:
-{"script":"Israel and Hamas have agreed a ceasefire framework. Mediators in Cairo say the deal covers a forty-day truce, with humanitarian access opening in stages. Neither delegation has signed yet, and both describe the talks as cautious. Earlier rounds collapsed at this same point. What happens next depends on whether either side publicly backs the framework this week.","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas","Cairo"],"quiz":[{"q":"How long is the proposed truce?","opts":["Forty days","One week","Six months","Indefinite"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet signed","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Where are the talks taking place?","opts":["Geneva","Doha","Cairo","Oslo"],"correct":2}]}
+{"script":"Israel and Hamas have agreed a ceasefire framework. Mediators in Cairo say the deal covers a forty-day truce, with humanitarian access opening in stages. Neither delegation has signed yet, and both describe the talks as cautious. Earlier rounds collapsed at this same point. What happens next depends on whether either side publicly backs the framework this week.","youtubeTitle":"Israel and Hamas agree 40-day ceasefire framework","imageQueries":["diplomatic negotiation table","united nations flags","handshake formal meeting"],"entities":["Israel","Hamas","Cairo"],"quiz":[{"q":"How long is the proposed truce?","opts":["Forty days","One week","Six months","Indefinite"],"correct":0},{"q":"What stage has the agreement reached?","opts":["Fully ratified","A framework, not yet signed","Rejected by both sides","Awaiting a public vote"],"correct":1},{"q":"Where are the talks taking place?","opts":["Geneva","Doha","Cairo","Oslo"],"correct":2}]}
 
 Example — Headline: "Core inflation cools to two point four percent"
 Summary: "The reading is the lowest in more than a year. Policymakers
@@ -210,19 +233,19 @@ held rates and said they want several more months of data before
 committing to cuts."
 No person, organisation or place is named anywhere, so entities is
 empty. This is the rare case:
-{"script":"Core inflation has cooled to two point four percent. That is the lowest reading in more than a year. Policymakers left rates unchanged and said they want several more months of data before committing to any cuts. Markets had hoped for a clearer signal. The next reading is what decides whether the first cut arrives this year.","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"What did policymakers do with rates?","opts":["Held them","Cut them","Raised them","Suspended the meeting"],"correct":0},{"q":"What do they say they need first?","opts":["A new mandate","Several more months of data","A government request","Lower unemployment"],"correct":1}]}
+{"script":"Core inflation has cooled to two point four percent. That is the lowest reading in more than a year. Policymakers left rates unchanged and said they want several more months of data before committing to any cuts. Markets had hoped for a clearer signal. The next reading is what decides whether the first cut arrives this year.","youtubeTitle":"Core inflation cools to 2.4%, rates left on hold","imageQueries":["supermarket shelves shopper","currency banknotes closeup","stock chart screen"],"entities":[],"quiz":[{"q":"What figure did core inflation reach?","opts":["Three point one percent","Two point four percent","One point eight percent","Four point two percent"],"correct":1},{"q":"What did policymakers do with rates?","opts":["Held them","Cut them","Raised them","Suspended the meeting"],"correct":0},{"q":"What do they say they need first?","opts":["A new mandate","Several more months of data","A government request","Lower unemployment"],"correct":1}]}
 
 Example — Headline: "Jannik Sinner withdraws from US Open with knee injury"
 Summary: "The world number two pulled out hours before his second-round
 match. His team said scans showed no structural damage."
 Note the player comes before the tournament in entities, because a photo
 of him is more use than a photo of a stadium:
-{"script":"Jannik Sinner has withdrawn from the US Open. The world number two pulled out just hours before his second-round match, citing a knee injury. His team says scans showed no structural damage. It is the second withdrawal of his season. Whether he returns before the end of the year is now the open question.","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"What did the scans show?","opts":["A fracture","Ligament damage","No structural damage","Nothing conclusive"],"correct":2},{"q":"When did he pull out?","opts":["Hours before his second-round match","After losing the first set","Before the tournament began","During the final"],"correct":0}]}
+{"script":"Jannik Sinner has withdrawn from the US Open. The world number two pulled out just hours before his second-round match, citing a knee injury. His team says scans showed no structural damage. It is the second withdrawal of his season. Whether he returns before the end of the year is now the open question.","youtubeTitle":"Jannik Sinner withdraws from US Open with knee injury","imageQueries":["tennis racket court","athlete knee strapping","empty stadium seats"],"entities":["Jannik Sinner","US Open (tennis)","Arthur Ashe Stadium"],"quiz":[{"q":"Why did he withdraw?","opts":["A knee injury","A wrist injury","Illness","A scheduling clash"],"correct":0},{"q":"What did the scans show?","opts":["A fracture","Ligament damage","No structural damage","Nothing conclusive"],"correct":2},{"q":"When did he pull out?","opts":["Hours before his second-round match","After losing the first set","Before the tournament began","During the final"],"correct":0}]}
 
 Example — a thin story where the source material runs out. Headline:
 "Kanter Freedom is not WNBA-eligible" with no usable Summary. The
 correct response is a SHORT script, not padding:
-{"script":"Enes Kanter Freedom is not WNBA-eligible. The former NBA centre will not play in the league, and the question of an arena ban remains undecided.","imageQueries":["empty basketball arena","basketball hoop closeup","sports press conference"],"entities":["Enes Kanter Freedom","WNBA"],"quiz":[{"q":"Which league did he previously play in?","opts":["The EuroLeague","The NBA","The G League","The NCAA"],"correct":1},{"q":"What position did he play?","opts":["Point guard","Shooting guard","Small forward","Centre"],"correct":3},{"q":"What remains undecided?","opts":["His salary","His retirement date","An arena ban","A trade"],"correct":2}]}`;
+{"script":"Enes Kanter Freedom is not WNBA-eligible. The former NBA centre will not play in the league, and the question of an arena ban remains undecided.","youtubeTitle":"Enes Kanter Freedom ruled not WNBA-eligible","imageQueries":["empty basketball arena","basketball hoop closeup","sports press conference"],"entities":["Enes Kanter Freedom","WNBA"],"quiz":[{"q":"Which league did he previously play in?","opts":["The EuroLeague","The NBA","The G League","The NCAA"],"correct":1},{"q":"What position did he play?","opts":["Point guard","Shooting guard","Small forward","Centre"],"correct":3},{"q":"What remains undecided?","opts":["His salary","His retirement date","An arena ban","A trade"],"correct":2}]}`;
 
 /* Models put the right answer at index 0 far too often. Shuffle the four
    options (Fisher-Yates) and move `correct` to wherever the right one
@@ -304,7 +327,28 @@ function parseScriptResponse(raw) {
         .slice(0, 3)
     : [];
 
-  return { script: parsed.script.trim(), imageQueries: queries, entities, quiz };
+  return { script: parsed.script.trim(), youtubeTitle: cleanYoutubeTitle(parsed.youtubeTitle), imageQueries: queries, entities, quiz };
+}
+
+/* The prompt asks for <= 60 chars, no emoji/hashtags/quotes, but models
+   drift — enforce it here. Anything still over the limit after cleaning
+   is dropped (null) rather than cut mid-phrase; scripts/upload.js then
+   falls back to the cleaned headline. */
+const YOUTUBE_TITLE_MAX = 60;
+function cleanYoutubeTitle(raw) {
+  if (typeof raw !== "string") return null;
+  const t = raw
+    .replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, "")
+    .replace(/#\S+/g, "")
+    .replace(/[<>"“”]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.\s]+$/, "");
+  if (t.length < 10 || t.length > YOUTUBE_TITLE_MAX) {
+    if (t) console.warn("[generate-audio] youtubeTitle rejected (" + t.length + " chars):", t.slice(0, 90));
+    return null;
+  }
+  return t;
 }
 
 /* Cheap sanity check on the opening line. Not a hard failure — a script
@@ -430,6 +474,7 @@ async function generateScript(headline, category, apiKey, description) {
   }
   // Not a warning — plenty of stories genuinely have no named subject,
   // and forcing entities onto those is the failure mode to watch for.
+  console.log("[generate-audio] youtubeTitle:", parsed.youtubeTitle || "(none — upload falls back to headline)");
   console.log(
     "[generate-audio] entities:",
     parsed.entities.length ? parsed.entities.join(" | ") : "(none — thematic story)"
@@ -560,6 +605,7 @@ export default async function handler(req, res) {
     let imageQueries = Array.isArray(providedQueries) ? providedQueries.slice(0, 3) : [];
     let entities = [];
     let quiz = [];
+    let youtubeTitle = null;
     // Only meaningful when we generated the script ourselves — a supplied
     // script came from the test harness and belongs to no prompt version.
     let promptVersion = null;
@@ -570,24 +616,25 @@ export default async function handler(req, res) {
       if (!imageQueries.length) imageQueries = generated.imageQueries;
       entities = generated.entities;
       quiz = generated.quiz;
+      youtubeTitle = generated.youtubeTitle;
       promptVersion = SCRIPT_PROMPT_VERSION;
     }
 
     // Persist all three before TTS — if narration fails, the script,
     // queries and questions survive on the row and the job can be
     // retried cheaply without paying for another AI call.
-    await supabase
-      .from("video_jobs")
-      .update({
-        script,
-        image_queries: imageQueries.length ? imageQueries : null,
-        entities: entities.length ? entities : null,
-        quiz: quiz.length ? quiz : null,
-        script_prompt_version: promptVersion,
-        status: "generating_audio",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", job.id);
+    // youtube_title is optional: if the column hasn't been migrated yet,
+    // the rest still saves (a failed update here would lose the script).
+    await updateWithOptional(supabase, "video_jobs", job.id, {
+      script,
+      youtube_title: youtubeTitle,
+      image_queries: imageQueries.length ? imageQueries : null,
+      entities: entities.length ? entities : null,
+      quiz: quiz.length ? quiz : null,
+      script_prompt_version: promptVersion,
+      status: "generating_audio",
+      updated_at: new Date().toISOString(),
+    }, ["youtube_title"]);
 
     // 2) Fish Audio TTS — returns raw MP3 bytes in the response body.
     const ttsRes = await fetch("https://api.fish.audio/v1/tts", {
@@ -633,7 +680,7 @@ export default async function handler(req, res) {
       .update({ status: "audio_ready", audio_url: audioUrl, updated_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    res.status(200).json({ jobId: job.id, audioUrl, script, imageQueries, entities, quiz, scriptPromptVersion: promptVersion });
+    res.status(200).json({ jobId: job.id, audioUrl, script, youtubeTitle, imageQueries, entities, quiz, scriptPromptVersion: promptVersion });
   } catch (e) {
     console.error("[generate-audio] failed:", e);
     await supabase

@@ -38,8 +38,15 @@
 //     add column if not exists youtube_id text,
 //     add column if not exists youtube_uploaded_at timestamptz,
 //     add column if not exists youtube_error text;
+// plus youtube_title / entities — see api/_optional-columns.js. Until
+// those exist, uploads fall back to the cleaned headline and category.
+//
+// Title, description, tags and category are built in
+// scripts/youtube-metadata.js.
 
 import { createClient } from "@supabase/supabase-js";
+import { buildSnippet } from "./youtube-metadata.js";
+import { isMissingColumn } from "../api/_optional-columns.js";
 
 // Six is the hard quota ceiling (6 × 1600 = 9600 of 10000). Lower it if
 // you also want to spend quota on anything else that day.
@@ -49,14 +56,6 @@ const MAX_PER_RUN = 3;
 // stories a day than the quota can upload, so the old oldest-first
 // queue meant every draft was already 2–3 days stale.
 const MAX_AGE_HOURS = 36;
-
-// YouTube truncates hard at 100 characters and rejects < > outright.
-const TITLE_LIMIT = 100;
-
-// News & Politics. Sports stories still fit here comfortably — the
-// category mostly affects which shelf YouTube files it under, not
-// distribution.
-const CATEGORY_ID = "25";
 
 const {
   YOUTUBE_CLIENT_ID,
@@ -112,37 +111,6 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-function buildTitle(story) {
-  // The headline regex in ingest.js strips a trailing " - Reuters" but
-  // not a leading "Exclusive | ". Both are outlet furniture and neither
-  // belongs in a Shorts title.
-  let title = (story.headline || "")
-    .replace(/^\s*(exclusive|breaking|analysis|opinion|watch|video|live)\s*[|:—–-]\s*/i, "")
-    .replace(/\s+[-|–—]\s+[^-|–—]+$/, "")
-    .replace(/[<>]/g, "")
-    .trim();
-
-  // #Shorts in the title is not required — YouTube classifies by aspect
-  // ratio and duration — but it costs nothing and still helps surfacing.
-  const suffix = " #Shorts";
-  if (title.length + suffix.length > TITLE_LIMIT) {
-    title = title.slice(0, TITLE_LIMIT - suffix.length - 1).trimEnd() + "…";
-  }
-  return title + suffix;
-}
-
-function buildDescription(story) {
-  const lines = [];
-  if (story.script) lines.push(story.script.trim(), "");
-  lines.push("More 30-second news at https://news30.live");
-  if (story.source) lines.push("", "Source: " + story.source);
-  // Attribution matters here: these are summaries of other newsrooms'
-  // reporting, and saying so is both honest and the thing that keeps
-  // this on the right side of a copyright complaint.
-  if (story.article_url) lines.push(story.article_url);
-  return lines.join("\n").slice(0, 4900);
-}
-
 async function uploadOne(story, accessToken) {
   // The Supabase media bucket is public, so no auth header needed here.
   const videoRes = await fetch(story.video_url);
@@ -151,12 +119,10 @@ async function uploadOne(story, accessToken) {
   console.log("[upload] fetched", (bytes.length / 1048576).toFixed(1), "MB");
 
   const metadata = {
-    snippet: {
-      title: buildTitle(story),
-      description: buildDescription(story),
-      categoryId: CATEGORY_ID,
-      tags: ["news", "shorts", story.category].filter(Boolean),
-    },
+    // title (youtube_title or cleaned headline + " #Shorts"), description
+    // (summary → site link → script → source → hashtags), tags, category
+    // 17 Sports / 25 News & Politics, language "en".
+    snippet: buildSnippet(story),
     status: {
       // The whole safety argument in one field. Do not change this to
       // "public" without replacing the human review step with something
@@ -217,16 +183,24 @@ async function main() {
   // at the front and blocked every upload behind it — while the run
   // still showed a green tick. `youtube_id is null` keeps it idempotent.
   const since = new Date(Date.now() - MAX_AGE_HOURS * 3600 * 1000).toISOString();
-  const { data: stories, error } = await supabase
-    .from("published_stories")
-    .select("id, headline, script, category, source, article_url, video_url")
-    .eq("status", "ready")
-    .is("youtube_id", null)
-    .is("youtube_error", null)
-    .not("video_url", "is", null)
-    .gte("updated_at", since)
-    .order("updated_at", { ascending: false })
-    .limit(MAX_PER_RUN);
+  const BASE_COLS = "id, headline, script, category, source, article_url, video_url";
+  const queue = (cols) =>
+    supabase
+      .from("published_stories")
+      .select(cols)
+      .eq("status", "ready")
+      .is("youtube_id", null)
+      .is("youtube_error", null)
+      .not("video_url", "is", null)
+      .gte("updated_at", since)
+      .order("updated_at", { ascending: false })
+      .limit(MAX_PER_RUN);
+
+  let { data: stories, error } = await queue(BASE_COLS + ", youtube_title, entities");
+  if (error && isMissingColumn(error, ["youtube_title", "entities"])) {
+    console.warn("[upload] youtube_title/entities columns missing — using headline + category. Run the migration in api/_optional-columns.js.");
+    ({ data: stories, error } = await queue(BASE_COLS));
+  }
 
   if (error) {
     console.error("[upload] could not read queue:", error.message);
