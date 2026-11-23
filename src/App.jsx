@@ -1244,6 +1244,7 @@ input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0
 .sb-item.on{background:var(--raised);font-weight:500}
 .sb-sep{height:1px;background:var(--line2);margin:12px 4px}
 .sb-note{padding:10px 12px;font-size:12px;color:var(--txt2);line-height:1.55}
+.sb-note a{color:inherit}
 .sb.mini{width:var(--sb-mini);padding:4px 4px 12px}
 .sb.mini .sb-item{flex-direction:column;gap:6px;height:74px;justify-content:center;font-size:10px;padding:0;border-radius:12px;gap:6px}
 .sb.mini .sb-sep,.sb.mini .sb-note{display:none}
@@ -1858,7 +1859,7 @@ function Sidebar({ mode, active, onNav }) {
       <div className="sb-note">
         AI-condensed news in 30 seconds. Geopolitics · Finance · Sports.
         <br />
-        <br />© 2026 News30
+        <br />© 2026 News30 · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>
       </div>
     </aside>
   );
@@ -1880,7 +1881,7 @@ function Drawer({ open, active, onNav, onClose }) {
         </div>
         <SidebarItems active={active} onNav={(id) => { onNav(id); onClose(); }} />
         <div className="sb-sep" />
-        <div className="sb-note">AI-condensed news in 30 seconds.<br />© 2026 News30</div>
+        <div className="sb-note">AI-condensed news in 30 seconds.<br />© 2026 News30 · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></div>
       </aside>
     </React.Fragment>
   );

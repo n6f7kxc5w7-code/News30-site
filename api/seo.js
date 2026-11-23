@@ -277,7 +277,8 @@ const siteHeader = () =>
 
 const siteFooter = () =>
   "<footer><p>News30 stories are AI-condensed summaries of reporting by the credited news outlets. " +
-  "Each story links to its original source.</p></footer>";
+  "Each story links to its original source.</p>" +
+  '<p><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p></footer>';
 
 function storyList(rows) {
   if (!rows.length) return "<p>No stories yet — check back soon.</p>";
