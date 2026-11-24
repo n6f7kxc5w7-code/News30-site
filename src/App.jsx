@@ -3296,7 +3296,21 @@ function VideoGenPanel({ story, onClose }) {
 /* ═════ 12 · PLAYER — fullscreen vertical story player (Shorts-style) ═ */
 function Player({ story, list, index, onNavIndex, onClose, user, userData, dispatch, toast }) {
   const [playing, setPlaying] = React.useState(true);
-  const [progress, setProgress] = React.useState(0);
+  /* Progress is stored with the id of the story it belongs to, so the
+     render where story.id changes already reads 0. (Resetting it in an
+     effect left the previous story's ~1.0 visible to the milestone and
+     watched effects for one commit, which fired video_50/75 and
+     VIDEO_WATCHED for the next story before it played.) Late events
+     from the previous story's <video> are tagged with its id and can't
+     leak into the new one. */
+  const [prog, setProg] = React.useState({ id: story.id, p: 0 });
+  const progress = prog.id === story.id ? prog.p : 0;
+  const setProgress = React.useCallback((sid, next) => {
+    setProg((prev) => {
+      const cur = prev.id === sid ? prev.p : 0;
+      return { id: sid, p: typeof next === "function" ? next(cur) : next };
+    });
+  }, []);
   const [panel, setPanel] = React.useState(null); // null | 'summary' | 'quiz'
   const [ppKey, setPpKey] = React.useState(0);
   const [heartKey, setHeartKey] = React.useState(0);
@@ -3305,7 +3319,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const videoRef = React.useRef(null);
   const hasVideo = !!story.video_url;
 
-  React.useEffect(() => { setProgress(0); setPlaying(true); }, [story.id]);
+  React.useEffect(() => { setPlaying(true); }, [story.id]);
 
   /* Headline and category pill fade out 2s into playback and return the
      moment it's paused, so they don't sit on top of the burned-in
@@ -3321,11 +3335,12 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   /* Simulated clock — only for stories with no rendered video yet. */
   React.useEffect(() => {
     if (hasVideo || !playing) return;
+    const sid = story.id;
     const iv = setInterval(() => {
-      setProgress((p) => Math.min(1, p + 0.1 / story.durationSec));
+      setProgress(sid, (p) => Math.min(1, p + 0.1 / story.durationSec));
     }, 100);
     return () => clearInterval(iv);
-  }, [playing, story.id, story.durationSec, hasVideo]);
+  }, [playing, story.id, story.durationSec, hasVideo, setProgress]);
 
   /* Keep the <video> element in sync with playing state. Browsers block
      autoplay with sound, so a rejected play() drops us into the paused
@@ -3350,31 +3365,39 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   /* 📊 video_open — once each time a story becomes the one on screen
      (the ref also absorbs React StrictMode's double effect in dev). */
   const openedRef = React.useRef(null);
+  /* Playback tracker for the story on screen: armed only by video_open,
+     so nothing below can fire for a story whose open wasn't logged. */
+  const playRef = React.useRef({ id: null, last: 0, fired: {} });
   React.useEffect(() => {
     if (openedRef.current === story.id) return;
     openedRef.current = story.id;
+    playRef.current = { id: story.id, last: 0, fired: {} };
     analytics.log("video_open", { storyId: story.id, category: story.category });
   }, [story.id, story.category]);
 
-  /* 📊 video_25 / video_50 / video_75 — each once per story per open. */
-  const milestonesRef = React.useRef({});
+  /* 📊 video_25 / video_50 / video_75 (once each per open) and
+     🔌 VIDEO_WATCHED at 90% (once per story; it unlocks the quiz and
+     counts toward "Videos watched", so it must reflect real viewing).
+     A milestone fires only when progress rises from below it to at or
+     above it while the video is playing, for the story video_open armed. */
   React.useEffect(() => {
-    const done = milestonesRef.current[story.id] || (milestonesRef.current[story.id] = {});
+    const t = playRef.current;
+    if (t.id !== story.id) return;
+    const prev = t.last;
+    t.last = progress;
+    if (!playing || !(progress > prev)) return;
     for (const pct of [25, 50, 75]) {
-      if (progress >= pct / 100 && !done[pct]) {
-        done[pct] = true;
+      const m = pct / 100;
+      if (prev < m && progress >= m && !t.fired[pct]) {
+        t.fired[pct] = true;
         analytics.log("video_" + pct, { storyId: story.id, category: story.category });
       }
     }
-  }, [progress, story.id, story.category]);
-
-  /* 🔌 VIDEO ENGAGEMENT: counts as watched at 90% */
-  React.useEffect(() => {
-    if (progress > 0.9 && !watchedRef.current[story.id]) {
+    if (prev <= 0.9 && progress > 0.9 && !watchedRef.current[story.id]) {
       watchedRef.current[story.id] = true;
       dispatch({ type: "VIDEO_WATCHED", story });
     }
-  }, [progress, story.id, story.category, dispatch]);
+  }, [progress, playing, story, dispatch]);
 
   /* 1 = moving to a later story (slides up from below), -1 = earlier
      story (slides down from above), 0 = first open, no animation. */
@@ -3470,9 +3493,9 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
               preload="auto"
               onTimeUpdate={(e) => {
                 const el = e.currentTarget;
-                if (el.duration) setProgress(el.currentTime / el.duration);
+                if (el.duration) setProgress(story.id, el.currentTime / el.duration);
               }}
-              onEnded={() => setProgress(1)}
+              onEnded={() => setProgress(story.id, 1)}
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
             />
