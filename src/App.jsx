@@ -86,6 +86,73 @@ const supabase = (CONFIG.DATABASE.SUPABASE_URL && CONFIG.DATABASE.SUPABASE_ANON_
   ? createClient(CONFIG.DATABASE.SUPABASE_URL, CONFIG.DATABASE.SUPABASE_ANON_KEY)
   : null;
 
+/* ── ANALYTICS — anonymous visitor events → Supabase `events` table ──
+   Columns: event, at (db default), user_id, session_id, story_id, payload.
+   - session_id is random per page load and lives only in this module's
+     memory: no cookie, no localStorage, nothing that survives a reload,
+     so it can't follow anyone across visits and needs no consent banner.
+   - user_id is attached only for a real Supabase session (read from the
+     auth client at send time), so it always matches auth.uid() and the
+     table's insert policy ("null or the signed-in user").
+   - Fire-and-forget. log() never throws and never blocks the UI.      */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const analytics = {
+  sessionId: (() => {
+    try {
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    } catch (e) { /* fall through */ }
+    return "s-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+  })(),
+  started: false,
+
+  log(event, payload) {
+    try {
+      if (!supabase) return;
+      const p = payload && typeof payload === "object" ? payload : {};
+      // story_id is a uuid column: only pipeline stories ("pub-<uuid>") fit.
+      const rawStory = String(p.storyId || "").replace(/^pub-/, "");
+      const storyId = UUID_RE.test(rawStory) ? rawStory.toLowerCase() : null;
+      Promise.resolve()
+        .then(() => supabase.auth.getSession())
+        .then(({ data }) =>
+          supabase.from("events").insert({
+            event: String(event).slice(0, 64),
+            user_id: (data && data.session && data.session.user && data.session.user.id) || null,
+            session_id: analytics.sessionId,
+            story_id: storyId,
+            payload: Object.keys(p).length ? p : null,
+          })
+        )
+        .then(() => {}, () => {});
+    } catch (e) {
+      /* analytics must never break the app */
+    }
+  },
+
+  /** Once per page load: where the visit came from. */
+  sessionStart() {
+    if (analytics.started) return;
+    analytics.started = true;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      let referrer = null;
+      try {
+        if (document.referrer) {
+          const host = new URL(document.referrer).hostname;
+          if (host && host !== window.location.hostname) referrer = host;
+        }
+      } catch (e) { /* malformed referrer */ }
+      analytics.log("session_start", {
+        src: (params.get("utm_source") || params.get("s") || "").slice(0, 64) || null,
+        referrer,
+        path: window.location.pathname,
+        mobile: window.innerWidth < 768,
+      });
+    } catch (e) { /* never throw */ }
+  },
+};
+export { analytics };
+
 const supabaseAuth = {
   configured() { return !!supabase; },
     async signInWithGoogle() {
@@ -838,21 +905,6 @@ const db = {
       return false;
     }
   },
-  /** Fire-and-forget event stream (quiz answers, watches, logins…).
-      No-ops without a real auth id — the demo sign-in chooser has no
-      auth.uid(), and firing these would just produce 403s. */
-  logEvent(user, event, payload) {
-    if (!this.enabled() || !user || !user.id) return;
-    supabase
-      .from("events")
-      .insert({
-        user_id: user.id,
-        user_email: user.email,
-        event,
-        payload: payload || null,
-      })
-      .then(() => {});
-  },
 };
 
 function userDataReducer(state, action) {
@@ -1001,6 +1053,7 @@ const mockAI = {
 
 const aiService = {
   async askNews(question, history = []) {
+    analytics.log("ask_ai", { q: String(question || "").slice(0, 200) });
     try {
       return await callAI({
         system:
@@ -1015,6 +1068,7 @@ const aiService = {
     }
   },
   async askStory(story, question, history = []) {
+    analytics.log("ask_ai", { q: String(question || "").slice(0, 200), storyId: story && story.id });
     try {
       return await callAI({
         system:
@@ -3293,6 +3347,27 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     setPlaying(false);
   }, [progress, index, list.length, onNavIndex]);
 
+  /* 📊 video_open — once each time a story becomes the one on screen
+     (the ref also absorbs React StrictMode's double effect in dev). */
+  const openedRef = React.useRef(null);
+  React.useEffect(() => {
+    if (openedRef.current === story.id) return;
+    openedRef.current = story.id;
+    analytics.log("video_open", { storyId: story.id, category: story.category });
+  }, [story.id, story.category]);
+
+  /* 📊 video_25 / video_50 / video_75 — each once per story per open. */
+  const milestonesRef = React.useRef({});
+  React.useEffect(() => {
+    const done = milestonesRef.current[story.id] || (milestonesRef.current[story.id] = {});
+    for (const pct of [25, 50, 75]) {
+      if (progress >= pct / 100 && !done[pct]) {
+        done[pct] = true;
+        analytics.log("video_" + pct, { storyId: story.id, category: story.category });
+      }
+    }
+  }, [progress, story.id, story.category]);
+
   /* 🔌 VIDEO ENGAGEMENT: counts as watched at 90% */
   React.useEffect(() => {
     if (progress > 0.9 && !watchedRef.current[story.id]) {
@@ -3352,6 +3427,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
   const doShare = async () => {
     const url = storyShareUrl(story);
     const ok = await copyText(url);
+    analytics.log("share", { storyId: story.id, from: "player", copied: ok });
     toast(ok ? "Link copied" : url, "share");
   };
 
@@ -3558,6 +3634,9 @@ function App() {
     return () => { document.head.removeChild(style); };
   }, []);
 
+  /* 📊 session_start, once per page load (guarded inside analytics). */
+  React.useEffect(() => { analytics.sessionStart(); }, []);
+
   /* 🔌 LIVE NEWS: real pipeline videos only. No NewsAPI headline
      fallback, no sample stories, no fake "breaking news" demo. The
      version always bumps so the feed can swap skeletons for either the
@@ -3584,21 +3663,43 @@ function App() {
 
   /* 🔌 SUPABASE PERSISTENCE: debounced whole-state upsert on every
      change while signed in. Guests / unconfigured = local-only. */
-  const userRef = React.useRef(null);
-  userRef.current = user;
   React.useEffect(() => {
     if (!user || !db.enabled()) return;
     const t = setTimeout(() => db.saveUserData(user, userData), 800);
     return () => clearTimeout(t);
   }, [userData, user]);
 
-  /* Same dispatch the UI always used, plus a mirrored row in the
-     Supabase events table when signed in (fire-and-forget). */
+  /* Same dispatch the UI always used, plus a row in the Supabase events
+     table for every visitor, signed in or not (📊 analytics.log). The
+     like/save payload records the state it was toggled TO, read from the
+     state as it was just before this dispatch. */
+  const userDataRef = React.useRef(userData);
+  userDataRef.current = userData;
   const dispatchTracked = React.useCallback((action) => {
+    const before = userDataRef.current.engagement;
     dispatch(action);
-    const u = userRef.current;
-    if (u && (action.type === "VIDEO_WATCHED" || action.type === "LIKE_TOGGLED" || action.type === "SAVE_TOGGLED" || action.type === "QUIZ_COMPLETE")) {
-      db.logEvent(u, action.type, action.result || { storyId: action.storyId || (action.story && action.story.id) });
+    switch (action.type) {
+      case "VIDEO_WATCHED":
+        analytics.log("VIDEO_WATCHED", { storyId: action.story.id, category: action.story.category });
+        break;
+      case "LIKE_TOGGLED":
+        analytics.log("LIKE_TOGGLED", { storyId: action.storyId, liked: !before.likedIds.includes(action.storyId) });
+        break;
+      case "SAVE_TOGGLED":
+        analytics.log("SAVE_TOGGLED", { storyId: action.storyId, saved: !before.savedIds.includes(action.storyId) });
+        break;
+      case "QUIZ_COMPLETE": {
+        const r = action.result || {};
+        const answers = Array.isArray(r.answers) ? r.answers : [];
+        analytics.log("QUIZ_COMPLETE", {
+          storyId: r.storyId,
+          correct: answers.filter((a) => a.correct).length,
+          total: answers.length,
+          points: r.points,
+        });
+        break;
+      }
+      default:
     }
   }, []);
 
@@ -3690,7 +3791,7 @@ is restored when the player closes. */
     const saved = await db.loadUserData(u.id);
     if (saved) dispatch({ type: "HYDRATE", data: saved });
     dispatch({ type: "LOGIN" });
-    db.logEvent(u, "LOGIN", { at: new Date().toISOString() });
+    analytics.log("LOGIN");
     toast("Signed in as " + u.name.split(" ")[0], "check");
   }, [toast]);
 
@@ -3815,7 +3916,9 @@ is restored when the player closes. */
             </button>
             <button onClick={async () => {
               const url = storyShareUrl(cardMenu.story);
-              const ok = await copyText(url); setCardMenu(null); toast(ok ? "Link copied" : url, "share");
+              const ok = await copyText(url);
+              analytics.log("share", { storyId: cardMenu.story.id, from: "card_menu", copied: ok });
+              setCardMenu(null); toast(ok ? "Link copied" : url, "share");
             }}>
               <Icon name="share" size={19} /> Copy link
             </button>
