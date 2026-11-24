@@ -60,6 +60,8 @@ const HOME_DESCRIPTION =
 const CACHE = {
   page: "public, max-age=0, s-maxage=300, stale-while-revalidate=3600",
   story: "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400",
+  // Expired-video pages carry a "watch the latest" shelf, so keep it fresher.
+  storyExpired: "public, max-age=0, s-maxage=900, stale-while-revalidate=3600",
   sitemap: "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400",
   missing: "no-store", // never let the edge pin a 404 on a URL that may resolve a moment later
   error: "no-store",
@@ -160,6 +162,19 @@ async function latestStories() {
   return rows;
 }
 
+// Newest ready stories that still have a video, for the "watch" shelf on
+// expired-video pages. Their own pages mount the app and open the player.
+let playableMemo = { at: 0, rows: null };
+async function latestPlayable() {
+  if (playableMemo.rows && Date.now() - playableMemo.at < 60000) return playableMemo.rows;
+  const rows = await sbSelect(
+    "select=id,headline,category,thumbnail_url,duration_seconds,created_at" +
+      "&status=eq.ready&video_url=not.is.null&order=created_at.desc&limit=6"
+  );
+  playableMemo = { at: Date.now(), rows };
+  return rows;
+}
+
 /* ───────────────────────── template ───────────────────────── */
 
 let templateMemo = { at: 0, html: null };
@@ -226,6 +241,27 @@ const STATIC_CSS = `<style>
 .n30s ul.list a:hover{text-decoration:underline}
 .n30s ul.list .meta{display:block}
 .n30s footer{margin-top:40px;color:#888;font-size:13px}
+.n30s .watch{background:#1a1a1a;border:1px solid #2c2c2c;border-radius:16px;padding:16px;margin:24px 0}
+.n30s .watch-title{margin:0 0 12px;font-size:19px;font-weight:700;line-height:1.3}
+.n30s .watch-title a{color:#fff;text-decoration:none}
+.n30s .watch-title a:hover{text-decoration:underline}
+.n30s .watch-title b{color:#ff3b30}
+.n30s .shelf{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.n30s .shelf a{display:block;color:#f1f1f1;text-decoration:none}
+.n30s .shelf a:hover .stitle{text-decoration:underline}
+.n30s .sthumb{position:relative;display:block;aspect-ratio:9/16;border-radius:12px;overflow:hidden;background:linear-gradient(160deg,#2a2a2a,#151515)}
+.n30s .sthumb img{width:100%;height:100%;object-fit:cover;display:block}
+.n30s .sthumb .play{position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center}
+.n30s .sthumb .play::after{content:"";margin-left:4px;border-style:solid;border-width:9px 0 9px 15px;border-color:transparent transparent transparent #fff}
+.n30s .sthumb .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.75);color:#fff;font-size:12px;font-weight:600;padding:1px 6px;border-radius:4px}
+.n30s .stitle{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;font-weight:500;line-height:1.35;margin-top:8px}
+.n30s .watch-cta{display:inline-block;margin-top:14px;background:#ff3b30;color:#fff;font-weight:700;text-decoration:none;padding:10px 18px;border-radius:999px}
+.n30s .watch-cta:hover{background:#ff5247}
+@media (max-width:600px){
+.n30s .shelf{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:10px;padding-bottom:4px}
+.n30s .shelf li{flex:0 0 34%;scroll-snap-align:start}
+.n30s .stitle{font-size:13px}
+}
 </style>`;
 
 // Branded 1200×630 fallback (public/og-default.png) for pages/stories
@@ -461,6 +497,38 @@ async function findStory(uuid) {
   return row || null;
 }
 
+const fmtDuration = (sec) => {
+  const s = Math.max(1, Math.round(Number(sec) || 30));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+
+/* "Watch today's news in 30 seconds →" — shown on story pages whose video
+   has expired, so a reader arriving from search has somewhere to go next.
+   Deliberately no heading element: the page's outline (h1 → Transcript)
+   stays exactly as before. */
+function watchShelf(rows, { lazy }) {
+  if (!rows.length) return "";
+  const cards = rows
+    .map((r) => {
+      const thumb = liveThumb(r);
+      return (
+        '<li><a href="' + esc(pathFor(r)) + '">' +
+        '<span class="sthumb">' +
+        (thumb ? '<img src="' + esc(thumb) + '" alt="" width="720" height="1280"' + (lazy ? ' loading="lazy"' : "") + " />" : "") +
+        '<span class="play"></span><span class="dur">' + fmtDuration(r.duration_seconds) + "</span></span>" +
+        '<span class="stitle">' + esc(r.headline || "News story") + "</span></a></li>"
+      );
+    })
+    .join("");
+  return (
+    '<aside class="watch" aria-label="Watch the latest News30 videos">' +
+    '<p class="watch-title"><a href="/">Watch today\'s news in 30 seconds <b>→</b></a></p>' +
+    '<ul class="shelf">' + cards + "</ul>" +
+    '<a class="watch-cta" href="/">Open the News30 feed →</a>' +
+    "</aside>"
+  );
+}
+
 async function storyPage(req, res) {
   const { segment, uuid } = storyRequest(req);
   if (!uuid) return notFound(req, res);
@@ -489,6 +557,11 @@ async function storyPage(req, res) {
 
   const template = await getTemplate(req);
   const canonical = absolute(path);
+  // Expired video → offer the newest playable stories instead. Never fatal.
+  let watchRows = [];
+  if (!safeHttpUrl(row.video_url)) {
+    watchRows = (await latestPlayable().catch(() => [])).filter((r) => r.id !== row.id).slice(0, 4);
+  }
   const cat = normaliseCategory(row.category);
   const catInfo = CATEGORIES[cat];
   const src = sourceName(row.source);
@@ -577,19 +650,21 @@ async function storyPage(req, res) {
     "</p>" +
     '<p class="note">This is an AI-condensed summary of reporting by ' + sourceLink +
     ". Read the original article for the full story.</p>" +
+    watchShelf(watchRows, { lazy: false }) +
     (image ? '<img class="thumb" src="' + esc(image) + '" alt="' + esc(row.headline || "") + '" width="1280" height="720" />' : "") +
     (script ? "<h2>Transcript</h2>\n" + scriptParagraphs(script) : "") +
     (articleUrl
       ? '<p><a href="' + esc(articleUrl) + '" rel="noopener" target="_blank">Read the original article at ' + esc(src) + " →</a></p>"
       : "") +
     "</article>" +
+    watchShelf(watchRows, { lazy: true }) +
     (related.length ? "<h2>More " + esc(catInfo.label.toLowerCase()) + " stories</h2>" + storyList(related) : "") +
     "</main>" + siteFooter() + "</div>";
 
   // data-video="0": the video has been deleted — main.jsx leaves this
   // page as-is instead of mounting the feed over the transcript.
   const rootAttrs = ' data-story="pub-' + row.id + '" data-video="' + (videoUrl ? "1" : "0") + '"';
-  send(res, 200, CACHE.story, render(template, { head, body, rootAttrs }));
+  send(res, 200, videoUrl ? CACHE.story : CACHE.storyExpired, render(template, { head, body, rootAttrs }));
 }
 
 async function notFound(req, res) {
