@@ -32,6 +32,12 @@
 // Required GitHub repo secrets:
 //   YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+// Optional (only used once, to create the stored spoken CTA clip):
+//   FISH_API_KEY, FISH_VOICE_ID
+//
+// YouTube copies get a watermark + "Test yourself → news30.live" end
+// card with a spoken line (scripts/youtube-cta.js). The site's video is
+// untouched; if that step fails for any reason, the original is uploaded.
 //
 // Required migration:
 //   alter table published_stories
@@ -46,6 +52,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { buildSnippet } from "./youtube-metadata.js";
+import { makeYouTubeVersion, createCtaClipLoader } from "./youtube-cta.js";
 import { isMissingColumn } from "../api/_optional-columns.js";
 
 // Six is the hard quota ceiling (6 × 1600 = 9600 of 10000). Lower it if
@@ -79,6 +86,9 @@ for (const [name, value] of Object.entries({
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// The spoken CTA clip, downloaded at most once per run and shared.
+const getCtaClip = createCtaClipLoader(supabase);
 
 /* Refresh tokens are long-lived; access tokens last an hour. Exchanging
    one for the other on every run is simpler and safer than caching an
@@ -115,8 +125,12 @@ async function uploadOne(story, accessToken) {
   // The Supabase media bucket is public, so no auth header needed here.
   const videoRes = await fetch(story.video_url);
   if (!videoRes.ok) throw new Error("could not fetch video (" + videoRes.status + ")");
-  const bytes = Buffer.from(await videoRes.arrayBuffer());
-  console.log("[upload] fetched", (bytes.length / 1048576).toFixed(1), "MB");
+  const original = Buffer.from(await videoRes.arrayBuffer());
+  console.log("[upload] fetched", (original.length / 1048576).toFixed(1), "MB");
+
+  // YouTube-only watermark + end card + spoken CTA. Never throws: on any
+  // problem it logs a warning and hands back the original bytes.
+  const { bytes } = await makeYouTubeVersion(original, { getClip: getCtaClip });
 
   const metadata = {
     // title (youtube_title or cleaned headline + " #Shorts"), description

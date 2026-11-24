@@ -43,7 +43,9 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: npm install @supabase/supabase-js --no-save
+        # ffmpeg-static: builds the YouTube-only copy (watermark + end
+        # card + spoken CTA) in scripts/youtube-cta.js.
+        run: npm install @supabase/supabase-js ffmpeg-static --no-save
 
       - name: Upload pending videos
         env:
@@ -52,4 +54,8 @@ jobs:
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Only used the first time, to create the stored spoken CTA clip
+          # (media/brand/youtube-cta-v1.mp3). Same voice as the videos.
+          FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+          FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
         run: node scripts/upload.js
