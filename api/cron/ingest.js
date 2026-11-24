@@ -48,7 +48,11 @@ const CATEGORY_MAP = {
   sports: "sports",
 };
 
-const STORIES_PER_CATEGORY = 2;
+// 3 per category x 3 categories x 6 runs a day (every 4h) = up to 54
+// new stories a day. Every pick is a NEW event (see the 48-hour
+// near-duplicate check below), so this is the real render rate, not a
+// ceiling that repeat picks quietly fail to reach. Storage budget below.
+const STORIES_PER_CATEGORY = 3;
 const HEADLINES_TO_CONSIDER = 40; // pool per category before ranking
 
 /* NewsAPI's description is one or two sentences of real detail. It is
@@ -67,37 +71,40 @@ const MAX_DESCRIPTION = 600;
      - 100 MB deliberate safety margin
      =  924 MB usable
 
-   Three things live in the bucket, and they behave differently.
+   Every rendered story leaves three files. Sizes as measured (Nov):
 
-   THUMBNAILS are what draw the cards on the feed, so a story without
-   one looks broken even when it has no video left. At ~0.14 MB each (847 files,
-   118 MB measured) that is only ~10 MB a day — but nothing was ever
-   deleting them, so over a few months they would quietly eat the whole
-   budget on their own. They get their own, much longer retention: at 30
-   days they settle at roughly 150 MB and stop growing.
+     video      ~3.3  MB   kept RETENTION_DAYS (3)
+     narration  ~0.29 MB   kept RETENTION_DAYS (3)
+     thumbnail  ~0.14 MB   kept THUMB_RETENTION_DAYS (30) — they draw
+                           the feed cards, so a story whose video has
+                           expired still looks right
 
-     924 MB usable
-     - 150 MB thumbnails at 30 days
-     =  774 MB for video + narration
+   The sweep runs with each ingest, every 4 hours, so a file can outlive
+   its retention by up to 4h: video/narration effectively last ~3.17
+   days and thumbnails ~30.17.
 
-   VIDEO + NARRATION. Measured 22 Sep, after the encoder was rate-capped:
-   video averaged 1.35 MB and narration 0.29 MB per render, against
-   ~15 MB per video before. That was -crf 30, which came in at roughly
-   360 kbps — far under its own 1500k ceiling, so the quality knob, not
-   the cap, was doing the work. -crf 25 spends some of that headroom
-   back on picture quality at an expected ~3 MB per video.
+   RENDER RATE. STORIES_PER_CATEGORY (3) x 3 categories x 6 ingest runs
+   a day = 54 renders a day. At 2 per category the measured ~285 MB
+   (Nov) is well under what a full 36 a day would use (~560 MB), most
+   likely because each run re-picked stories it already had, which the
+   article_url upsert then silently dropped. The 48-hour near-duplicate
+   check now hands those slots to the next new story, so plan for the
+   full 54.
 
-   Render rate is the least certain input: 34 videos were present under
-   a 12-hour retention, implying ~68 renders a day, which is double what
-   the schedule suggests. Using the higher figure deliberately.
+     video + narration  54/day x 3.17 days  x 3.59 MB = ~615 MB
+     thumbnails         54/day x 30.17 days x 0.14 MB = ~228 MB
+                                                        --------
+     peak, steady state                                 ~843 MB
 
-     68 renders/day x (3 MB video + 0.29 MB narration) = ~225 MB/day
-     774 MB / 225 MB per day = 3.4 days
+   That is inside the 924 MB usable with ~80 MB to spare (~180 MB under
+   the hard 1 GB limit). KEEP_NEWEST (45) costs nothing extra: 54 a day
+   means ~160 videos are inside the 3-day window at any time.
 
-   So three days, rounded down. Peak usage lands around 825 MB, which
-   preserves the 100 MB margin, and the site keeps three days of
-   playable video instead of the twelve hours that made every card older
-   than half a day show as a placeholder.
+   Thumbnails take ~30 days to reach their share, so total usage will
+   climb for about a month before it levels off. If the real number
+   heads past ~900 MB, the cheapest levers are THUMB_RETENTION_DAYS = 21
+   (saves ~70 MB) or RETENTION_DAYS = 2 (saves ~195 MB, but the site
+   then keeps two days of playable video instead of three).
 
    IF ANY INPUT CHANGES, REDO THE SUM. More renders per day, bigger
    files, or a different encoder setting all move it. The query to check
@@ -118,8 +125,9 @@ const STORAGE_BUCKET = "media";
 // Without this, a pipeline that stalls for three days (out of credits,
 // an API change) empties the site completely. With it, the site always
 // shows at least the last ~45 real videos while the pipeline is fixed.
-// Cost: at most ~45 × 3.3 MB ≈ 150 MB of the 1 GB, and normally zero
-// extra because the newest 45 are inside the 3-day window anyway.
+// Cost: at most ~45 × 3.6 MB ≈ 160 MB of the 1 GB, and normally zero
+// extra because at 54 renders a day the newest 45 are well inside the
+// 3-day window anyway.
 const KEEP_NEWEST = 45;
 
 // "https://x.supabase.co/storage/v1/object/public/media/video/a.mp4"
@@ -162,14 +170,59 @@ const STOPWORDS = new Set([
   "she","they","we","you","not","no","more","most","up","down","out","about",
 ]);
 
+/* Two outlets rarely word the same event the same way: "Nvidia shares
+   surge after record earnings" vs "Nvidia stock jumps on record
+   quarterly results" share only nvidia/record as raw words. Folding
+   plurals/tenses and the most common headline synonyms onto one form
+   makes them share nvidia/share/rise/record/earning instead. Kept
+   deliberately small — every entry here is a word that, in a headline,
+   almost never distinguishes one story from another. */
+const CANON = {
+  stock: "share", equity: "share",
+  surge: "rise", soar: "rise", jump: "rise", rally: "rise", climb: "rise", gain: "rise", spike: "rise",
+  fall: "drop", slide: "drop", tumble: "drop", plunge: "drop", sink: "drop", slump: "drop", dip: "drop", fell: "drop",
+  result: "earning", profit: "earning",
+  agreement: "deal", accord: "deal", pact: "deal",
+  truce: "ceasefire",
+  kill: "dead", killed: "dead", death: "dead", die: "dead", died: "dead",
+  win: "beat", won: "beat", defeat: "beat",
+  election: "vote", poll: "vote", ballot: "vote",
+  president: "leader", minister: "leader", premier: "leader",
+  hold: "hold", keep: "hold", steady: "hold", unchang: "hold", pause: "hold",
+  federal: "fed", reserve: "fed",
+};
+
+// Two-letter words are normally noise, except these: "UK inflation"
+// and "US inflation" are different stories.
+const SHORT_KEEP = new Set(["uk", "us", "eu", "un", "ai"]);
+
+function stem(w) {
+  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
+  if (w.length > 4 && w.endsWith("ied")) return w.slice(0, -3) + "y";
+  if (w.length > 4 && w.endsWith("ed")) return w.slice(0, -2);
+  if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us")) return w.slice(0, -1);
+  return w;
+}
+
+/* NewsAPI titles end in " - Reuters" / " | BBC News"; stored headlines
+   have that stripped. Stripping it before comparing keeps the outlet
+   name from counting as (or against) a shared word. */
+function cleanHeadline(title) {
+  return (title || "").replace(/\s+[-|–]\s+[^-|–]+$/, "").trim();
+}
+
 function tokenize(title) {
-  return new Set(
-    (title || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 2 && !STOPWORDS.has(w))
-  );
+  const out = new Set();
+  const text = cleanHeadline(title).toLowerCase()
+    .replace(/(\d)\.(\d)/g, "$1p$2") // keep "2.3%" vs "3.1%" apart: 2p3 / 3p1
+    .replace(/[^a-z0-9\s]/g, " ");
+  for (const raw of text.split(/\s+/)) {
+    if ((raw.length <= 2 && !SHORT_KEEP.has(raw)) || STOPWORDS.has(raw)) continue;
+    const w = CANON[raw] || CANON[stem(raw)] || stem(raw);
+    if (!STOPWORDS.has(w)) out.add(w);
+  }
+  return out;
 }
 
 // Jaccard similarity. Two headlines about the same event share their
@@ -184,6 +237,63 @@ function similarity(aTokens, bTokens) {
 }
 
 const SAME_STORY_THRESHOLD = 0.28;
+
+// Two headlines are the same story when their wording overlaps enough
+// AND they share at least two distinctive words, so a pair of four-word
+// headlines can't match on a single shared word.
+function sameStory(aTokens, bTokens) {
+  let shared = 0;
+  for (const t of aTokens) if (bTokens.has(t)) shared++;
+  return shared >= 2 && similarity(aTokens, bTokens) >= SAME_STORY_THRESHOLD;
+}
+
+/* ─── NO NEAR-DUPLICATES ACROSS RUNS OR CATEGORIES ──────────────────
+   Clustering inside rankStories only merges duplicates within one
+   category's feed in one run. Two other ways the same event got
+   through twice:
+     - across runs: a story picked at 08:00 was picked again at 12:00
+       from a different outlet's URL, which the article_url upsert
+       doesn't catch;
+     - across categories: the same story in "general" and "business".
+   So a candidate is skipped if it is the same story as anything
+   ingested in the last RECENT_HOURS (any status) or already picked
+   earlier in this run, and the next-best story takes its slot. */
+const RECENT_HOURS = 48;
+
+async function loadRecentHeadlines(supabase) {
+  const since = new Date(Date.now() - RECENT_HOURS * 3600 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("published_stories")
+    .select("headline, category")
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  if (error) throw new Error(error.message);
+  return (data || [])
+    .filter((r) => r.headline)
+    .map((r) => ({ tokens: tokenize(r.headline), headline: r.headline, category: r.category }));
+}
+
+/** Top `limit` of `ranked` that aren't the same story as anything in
+    `seen`. Picks are added to `seen` so later categories skip them. */
+function pickFresh(ranked, limit, seen, category) {
+  const picked = [];
+  for (const t of ranked) {
+    if (picked.length >= limit) break;
+    const tokens = tokenize(t.article.title);
+    const dupe = seen.find((s) => sameStory(tokens, s.tokens));
+    if (dupe) {
+      console.log(
+        "[ingest]", category, "skip near-duplicate:", cleanHeadline(t.article.title).slice(0, 60),
+        "≈", (dupe.category ? dupe.category + ": " : "") + String(dupe.headline).slice(0, 60)
+      );
+      continue;
+    }
+    picked.push(t);
+    seen.push({ tokens, headline: cleanHeadline(t.article.title), category });
+  }
+  return picked;
+}
 
 function sourceTier(name) {
   return SOURCE_TIER[(name || "").toLowerCase().trim()] || 1;
@@ -385,13 +495,14 @@ async function cleanupOldMedia(supabase) {
 }
 
 /**
- * Ranks a category's headlines and returns the top N.
+ * Ranks a category's headlines, best first (all of them — pickFresh
+ * takes the top N that aren't near-duplicates of recent stories).
  *
  * Clusters near-duplicate headlines first, so the three chosen stories
  * are three different events rather than three write-ups of one. That
  * clustering does double duty: cluster size IS the corroboration count.
  */
-function rankStories(articles, limit) {
+function rankStories(articles) {
   const usable = articles.filter(
     (a) => a && a.title && a.title !== "[Removed]" && a.url
   );
@@ -403,7 +514,7 @@ function rankStories(articles, limit) {
     let placed = false;
 
     for (const cluster of clusters) {
-      if (similarity(tokens, cluster.tokens) >= SAME_STORY_THRESHOLD) {
+      if (sameStory(tokens, cluster.tokens)) {
         cluster.members.push({ article, feedIndex });
         // Keep the highest-tier outlet as the cluster's representative:
         // Reuters' wording of an event beats an aggregator's rewrite.
@@ -484,7 +595,7 @@ function rankStories(articles, limit) {
     };
   });
 
-  return scored.sort((a, b) => b.significance - a.significance).slice(0, limit);
+  return scored.sort((a, b) => b.significance - a.significance);
 }
 
 export default async function handler(req, res) {
@@ -551,6 +662,16 @@ export default async function handler(req, res) {
     summary.cleanup = { error: true };
   }
 
+  // Everything ingested in the last 48h, plus this run's picks as they
+  // are made. If the lookup fails, still dedupe within this run.
+  let seen = [];
+  try {
+    seen = await loadRecentHeadlines(supabase);
+    console.log("[ingest] near-duplicate check against", seen.length, "stories from the last", RECENT_HOURS + "h");
+  } catch (e) {
+    console.error("[ingest] could not load recent headlines — near-duplicate check covers this run only:", String(e.message || e));
+  }
+
   try {
     for (const [category, apiCategory] of Object.entries(CATEGORY_MAP)) {
       const url =
@@ -566,7 +687,7 @@ export default async function handler(req, res) {
       }
 
       const json = await r.json();
-      const top = rankStories(json.articles || [], STORIES_PER_CATEGORY);
+      const top = pickFresh(rankStories(json.articles || []), STORIES_PER_CATEGORY, seen, category);
 
       console.log(
         "[ingest]", category, "picked:",
@@ -584,7 +705,7 @@ export default async function handler(req, res) {
       const rows = top.map((t, i) => ({
         article_url: t.article.url,
         category,
-        headline: (t.article.title || "").replace(/\s+[-|–]\s+[^-|–]+$/, "").trim(),
+        headline: cleanHeadline(t.article.title),
         /* NewsAPI's own one-or-two-sentence summary. Previously thrown
            away, which left DeepSeek writing 65-75 word scripts from a
            headline alone — it cannot, and the prompt (correctly) forbids
