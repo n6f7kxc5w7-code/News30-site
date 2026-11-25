@@ -1471,7 +1471,6 @@ const CSS2 = `
   .card-title{font-size:15px;line-height:21px;-webkit-line-clamp:3}
   .thumb .hov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 70%;animation:fade .25s}
 }
-.pl-freeze{visibility:hidden;pointer-events:none}
 .pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
 /* ── slide panel (summary / quiz — one shared shell) ── */
 .pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:#212121;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.45);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
@@ -2303,6 +2302,16 @@ function GoogleModal({ onPick, onClose }) {
 
 /* Desktop: hovering a card for a moment plays a silent preview of the
    video in place, like YouTube. Mouse/trackpad only; touch never sees it. */
+/* Stop a media element AND drop its media, so it can't linger as a live
+   (if detached) media session after it's gone from the screen. */
+function releaseMedia(el) {
+  if (!el) return;
+  try {
+    el.pause();
+    if (el.getAttribute("src")) { el.removeAttribute("src"); el.load(); }
+  } catch (e) { /* already gone */ }
+}
+
 const canHoverPreview = () => {
   try { return window.matchMedia("(hover: hover) and (pointer: fine) and (min-width: 1024px)").matches; }
   catch (e) { return false; }
@@ -2311,21 +2320,29 @@ const canHoverPreview = () => {
 function StoryCard({ story, onOpen, onCardMenu }) {
   const [preview, setPreview] = React.useState(false);
   const hoverRef = React.useRef(null);
+  const previewRef = React.useRef(null);
   const enter = () => {
     if (!story.video_url || !canHoverPreview()) return;
-    hoverRef.current = setTimeout(() => setPreview(true), 450);
+    hoverRef.current = setTimeout(() => {
+      // Never a second video while the player is open.
+      if (!document.querySelector(".player")) setPreview(true);
+    }, 450);
   };
-  const leave = () => { clearTimeout(hoverRef.current); setPreview(false); };
-  React.useEffect(() => () => clearTimeout(hoverRef.current), []);
+  const leave = () => {
+    clearTimeout(hoverRef.current);
+    releaseMedia(previewRef.current);
+    setPreview(false);
+  };
+  React.useEffect(() => () => { clearTimeout(hoverRef.current); releaseMedia(previewRef.current); }, []);
   return (
-    <div className="card" onClick={onOpen} role="button" tabIndex={0}
+    <div className="card" onClick={() => { leave(); onOpen(); }} role="button" tabIndex={0}
       onMouseEnter={enter} onMouseLeave={leave}
       onKeyDown={(e) => { if (e.key === "Enter") onOpen(); }}>
             <div className="thumb">
         {story.thumbnail_url
           ? <img src={story.thumbnail_url} alt="" loading="lazy" />
           : <ThumbArt story={story} />}
-        {preview && <video className="hov" src={story.video_url} muted autoPlay loop playsInline preload="auto" aria-hidden="true" />}
+        {preview && <video ref={previewRef} className="hov" src={story.video_url} muted autoPlay loop playsInline preload="auto" aria-hidden="true" />}
         <span className="badge-date">{dateBadge(story.publishedAt)}</span>
         <span className="badge-dur">{story.duration}</span>
       </div>
@@ -3499,23 +3516,6 @@ function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, o
    browsers allow it). */
 let soundOnThisVisit = false;
 
-/* WebKit's media stack (Safari on Mac/iPad, and every browser on iPhone
-   and iPad, which all run WebKit) ramps the audio back in when playback
-   resumes, so the first word after a pause comes out faded or lost. It
-   is not in our code: nothing here changes volume on pause/play. Chrome,
-   Edge, Firefox and Android browsers (all "Chrome"/no "AppleWebKit" in
-   the UA) don't do it and never take the path below. */
-const WEBKIT_MEDIA = (() => {
-  try {
-    const ua = navigator.userAgent || "";
-    return /AppleWebKit/i.test(ua) && !/Chrome|Chromium|Edg\/|OPR\//i.test(ua);
-  } catch (e) {
-    return false;
-  }
-})();
-const PREROLL_SECONDS = 0.3;   // enough for the ramp to finish before new words
-const PREROLL_AFTER_MS = 1000; // shorter pauses resume normally
-
 /* Muted autoplay is the only kind every browser allows on arrival (for
    example from a Google result), and the captions are burned in, so the
    video reads without sound. Start with sound only when the page has
@@ -3574,6 +3574,13 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   };
 
   React.useEffect(() => { setPlaying(true); setSoundBlocked(false); }, [story.id]);
+  /* When a story leaves the screen (next story, or player closed), its
+     <video> is removed by React; release it so it can't linger as a
+     second, detached media session. */
+  React.useEffect(() => {
+    const v = videoRef.current;
+    return () => releaseMedia(v);
+  }, [story.id]);
 
   /* Headline and category pill fade out 2s into playback and return the
      moment it's paused, so they don't sit on top of the burned-in
@@ -3607,7 +3614,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     const v = videoRef.current;
     if (!v) return;
     if (playing) {
-      (v.paused ? startPlayback(v) : v.play()).catch(() => {
+      v.play().catch(() => {
         // Refused with sound → retry muted (with the "Tap for sound"
         // hint). Refused even muted (e.g. data saver) → paused, and the
         // tap overlay starts it.
@@ -3631,7 +3638,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     const v = getVideo();
     if (v) {
       v.muted = false;
-      if (v.paused) startPlayback(v).catch(() => {});
+      if (v.paused) v.play().catch(() => {});
       // If the browser kept it muted (or stopped it), say so plainly and
       // let the next tap on the video itself try again.
       setTimeout(() => {
@@ -3651,71 +3658,15 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const soundUp = (e) => { if (e.pointerType !== "mouse") { e.stopPropagation(); unmute(); } };
   const soundClick = (e) => { e.stopPropagation(); unmute(); };
 
-  /* Seamless resume on WebKit (see WEBKIT_MEDIA). After a pause over a
-     second, with sound on:
-       1. the paused frame is drawn onto a canvas laid exactly over the
-          video, so what the viewer sees doesn't change;
-       2. playback restarts PREROLL_SECONDS earlier, so WebKit's fade-in
-          lands on audio that was already heard;
-       3. the canvas is removed on the first frame at or past the paused
-          one, and the progress bar ignores the pre-roll.
-     The picture never moves backwards and the next word arrives at full
-     volume. Every other browser just calls play(). State lives on the
-     element, so a previous story's video can't affect the next one. */
-  const freezeRef = React.useRef(null);
-  const endPreroll = (v) => {
-    if (v.__n30Preroll == null) return;
-    v.__n30Preroll = null;
-    clearTimeout(v.__n30PrerollSafety);
-    if (freezeRef.current) freezeRef.current.style.visibility = "hidden";
+  const onVideoPause = () => setPlaying(false);
+  /* One video at a time: whenever the player's video starts, any other
+     media element on the page (a hover preview, a leftover from the
+     server-rendered page) is stopped and released. */
+  const onVideoPlay = (e) => {
+    const self = e.currentTarget;
+    document.querySelectorAll("video, audio").forEach((m) => { if (m !== self) releaseMedia(m); });
+    setPlaying(true);
   };
-  const prerollIfNeeded = (v) => {
-    const pausedAt = v.__n30PausedAt;
-    v.__n30PausedAt = 0;
-    if (!WEBKIT_MEDIA || !pausedAt || Date.now() - pausedAt < PREROLL_AFTER_MS) return;
-    if (v.muted || v.ended || v.currentTime < 0.05 || !v.videoWidth) return; // nothing audible to lose
-    const c = freezeRef.current;
-    if (!c) return;
-    const target = v.currentTime;
-    try {
-      c.width = v.videoWidth;
-      c.height = v.videoHeight;
-      c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
-    } catch (e) {
-      return; // can't freeze the frame → plain resume rather than a visible jump
-    }
-    c.style.visibility = "visible";
-    v.__n30Preroll = target;
-    v.currentTime = Math.max(0, target - PREROLL_SECONDS);
-    // Never leave the overlay up if a seek or frame callback stalls.
-    v.__n30PrerollSafety = setTimeout(() => endPreroll(v), 1500);
-    const reached = (t) => t >= target - 0.02;
-    const watch = () => {
-      if (v.__n30Preroll == null) return;
-      if (v.requestVideoFrameCallback) {
-        v.requestVideoFrameCallback((now, meta) => (reached(meta.mediaTime) ? endPreroll(v) : watch()));
-      } else {
-        requestAnimationFrame(() => (reached(v.currentTime) && !v.paused ? endPreroll(v) : watch()));
-      }
-    };
-    watch();
-  };
-  /* Every resume goes through here (tap, Space, unmute, the play effect). */
-  const startPlayback = (v) => {
-    prerollIfNeeded(v);
-    return v.play();
-  };
-  const onVideoPause = (e) => {
-    const el = e.currentTarget;
-    if (el.__n30Preroll != null) {
-      // Paused again mid pre-roll: go back to where they had paused.
-      el.currentTime = el.__n30Preroll;
-      endPreroll(el);
-    }
-    if (!el.ended) el.__n30PausedAt = Date.now();
-    setPlaying(false);
-  };
-  const onVideoPlay = () => setPlaying(true);
 
   /* Story pages hand over the server-rendered video's position, so the
      player continues from the same second instead of restarting. */
@@ -3798,7 +3749,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     if (hasVideo && muted) { unmute(); return; }
     const v = hasVideo ? getVideo() : null;
     if (v) {
-      if (v.paused) { startPlayback(v).catch(() => {}); setPlaying(true); }
+      if (v.paused) { v.play().catch(() => {}); setPlaying(true); }
       else { v.pause(); setPlaying(false); }
     } else {
       setPlaying((p) => !p);
@@ -3907,7 +3858,6 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
               onLoadedMetadata={onLoadedMetadata}
               onTimeUpdate={(e) => {
                 const el = e.currentTarget;
-                if (el.__n30Preroll != null) return; // hidden pre-roll: keep the bar still
                 if (el.duration) setProgress(story.id, el.currentTime / el.duration);
               }}
               onEnded={() => setProgress(story.id, 1)}
@@ -3918,7 +3868,6 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
           ) : (
             <ThumbArt story={story} variant="video" paused={!playing} />
           )}
-          {hasVideo && <canvas ref={freezeRef} className="pl-vid pl-freeze" aria-hidden="true" />}
           <div className="pl-grad" />
           <button className="pl-tap" onPointerUp={tapUp} onClick={togglePlay} aria-label={hasVideo && muted ? "Turn sound on" : playing ? "Pause" : "Play"} />
           {hasVideo && muted && (

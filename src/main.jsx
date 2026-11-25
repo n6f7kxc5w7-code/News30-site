@@ -36,7 +36,15 @@ if (legacy) {
         time: hero && Number.isFinite(hero.currentTime) ? hero.currentTime : 0,
         muted: hero ? hero.muted : true,
       };
-      if (hero) hero.pause();
+      /* Release it completely, not just pause it: a detached element that
+         still holds its media is a second live media session next to the
+         player's, which iPadOS/Safari can trip over on pause/resume. */
+      if (hero) {
+        hero.pause();
+        hero.removeAttribute("src");
+        hero.load();
+        hero.remove();
+      }
     }
   } catch (e) {
     handoff = null; // fall back to the normal deep-link fetch
