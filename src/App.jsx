@@ -3631,11 +3631,15 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
 
   /* Unmute inside the tap itself — browsers only allow sound from within
      a user gesture, so this must not wait for an effect. */
-  const unmute = () => {
+  const unmute = (via) => {
+    const v = getVideo();
+    /* 📊 sound_on — only when this actually turns sound on. One tap can
+       call unmute() twice (pointerup + click); the element is already
+       unmuted by the second call, so it's logged once. */
+    if (v && v.muted) analytics.log("sound_on", { storyId: story.id, via });
     lastUnmuteRef.current = Date.now();
     soundOnThisVisit = true;
     setMuted(false);
-    const v = getVideo();
     if (v) {
       v.muted = false;
       if (v.paused) v.play().catch(() => {});
@@ -3655,8 +3659,8 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
      rather than waiting for the synthesized click, which iPadOS can
      drop or delay. Mouse keeps using click. unmute() is idempotent, so
      both firing for one tap is harmless. */
-  const soundUp = (e) => { if (e.pointerType !== "mouse") { e.stopPropagation(); unmute(); } };
-  const soundClick = (e) => { e.stopPropagation(); unmute(); };
+  const soundUp = (e) => { if (e.pointerType !== "mouse") { e.stopPropagation(); unmute("pill"); } };
+  const soundClick = (e) => { e.stopPropagation(); unmute("pill"); };
 
   const onVideoPause = () => setPlaying(false);
   /* One video at a time: whenever the player's video starts, any other
@@ -3746,7 +3750,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
      refused once sound is on. */
   const togglePlay = () => {
     if (Date.now() - lastUnmuteRef.current < 700) return; // same tap already unmuted
-    if (hasVideo && muted) { unmute(); return; }
+    if (hasVideo && muted) { unmute("video"); return; }
     const v = hasVideo ? getVideo() : null;
     if (v) {
       if (v.paused) { v.play().catch(() => {}); setPlaying(true); }
@@ -3758,7 +3762,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   };
   const tapUp = (e) => {
     if (e.pointerType === "mouse" || !(hasVideo && muted)) return;
-    unmute();
+    unmute("video");
   };
   /* Mobile Ask AI chat: pause while it's open, resume from the same spot
      on close if it was playing before. */
@@ -3772,7 +3776,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
       else if (e.key === "ArrowUp") { e.preventDefault(); prev(); }
       else if (e.key === " ") { e.preventDefault(); setPlaying((p) => !p); setPpKey((k) => k + 1); }
       else if ((e.key === "m" || e.key === "M") && hasVideo && !/^(INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || "")) {
-        if (muted) unmute(); else setMuted(true);
+        if (muted) unmute("key"); else setMuted(true);
       }
       else if (e.key === "Escape") { if (panel) setPanel(null); else onClose(); }
     };
