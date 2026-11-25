@@ -322,6 +322,7 @@ const ICONS = {
   bolt: <path d="M13 2 4.8 13.2h4.9L11 22l8.2-11.2h-4.9z" />,
   share: <path d="M14.5 9.1V5.2L21 12l-6.5 6.8v-3.9c-4.6 0-8 1.5-10.5 4.6.9-5.6 4.5-9.7 10.5-10.4z" />,
   volumeOff: <path d="M11 5 6 9H3v6h3l5 4zM22 9l-6 6M16 9l6 6" />,
+  externalLink: <><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></>,
   arrowUp: <><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></>,
   arrowDown: <><path d="M12 5v14" /><path d="M18 13l-6 6-6-6" /></>,
   arrowLeft: <><path d="M19 12H5" /><path d="M11 6l-6 6 6 6" /></>,
@@ -1399,6 +1400,76 @@ const CSS2 = `
 .pl-sound:hover{background:rgba(0,0,0,.78)}
 @keyframes snd-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 @keyframes snd-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 0 7px rgba(255,255,255,0)}}
+/* ── desktop watch layout (.pl-wide: player ≥1024px wide, set from JS so
+   nothing here can reach phones or tablets) ── */
+.player.pl-wide{gap:28px;padding:0 32px}
+.pl-wide .pl-stage{height:calc(100% - 40px);max-height:920px}
+.player.pl-wide.panel-open .pl-stage{transform:none}
+.pl-wide .pl-info,.pl-wide .pl-topline,.pl-wide .pl-nav{display:none}
+.pl-wide .pl-rail{padding-left:14px}
+.pl-wide .rail-sum,.pl-wide .rail-quiz{display:none}
+.pl-wide .pl-close .ibtn{width:auto;padding:0 16px 0 12px;border-radius:999px;gap:8px;font-size:14px;font-weight:500}
+.pl-close-t{display:none}
+.pl-wide .pl-close-t{display:inline}
+.pl-side{position:relative;flex:none;width:clamp(340px,27vw,460px);height:calc(100% - 40px);max-height:920px}
+.ws-scroll{height:100%;overflow-y:auto;display:flex;flex-direction:column;gap:18px;padding-right:6px;scrollbar-width:thin}
+.pl-side .pnl{top:0;right:0;bottom:0;left:0;width:auto;max-width:none}
+.ws-kick{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2);font-weight:500}
+.ws-kick .chip-cat{display:inline-flex;align-items:center;gap:6px;color:var(--txt);background:var(--raised);border-radius:999px;padding:4px 11px 4px 9px;font-weight:600}
+.ws-title{font-size:23px;line-height:1.28;font-weight:700;margin:10px 0 0;letter-spacing:-.2px}
+.ws-src{margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13.5px;color:var(--txt2)}
+.ws-src b{color:var(--txt);font-weight:600}
+.ws-orig{margin-top:12px;display:inline-flex;align-items:center;gap:7px;color:var(--blue);font-size:14px;font-weight:500;text-decoration:none}
+.ws-orig:hover{text-decoration:underline}
+.ws-card{background:#1b1b1b;border:1px solid var(--line2);border-radius:14px;padding:14px 16px}
+.ws-row{display:flex;gap:10px}
+.ws-btn{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;border-radius:999px;background:var(--raised);color:var(--txt);font-size:14px;font-weight:600}
+.ws-btn:hover{background:var(--hover)}
+.ws-btn.on{background:#f1f1f1;color:#0f0f0f}
+.ws-btn:disabled{opacity:.55;cursor:default}
+.ws-quiz{display:flex;align-items:center;gap:12px}
+.ws-quiz .ic-wrap{width:40px;height:40px;border-radius:12px;background:rgba(62,166,255,.14);color:var(--blue);display:flex;align-items:center;justify-content:center;flex:none}
+.ws-quiz-t{font-size:14.5px;font-weight:600}
+.ws-quiz-s{font-size:12.5px;color:var(--txt2);margin-top:2px}
+.ws-bar{height:4px;border-radius:2px;background:rgba(255,255,255,.12);margin-top:8px;overflow:hidden}
+.ws-bar i{display:block;height:100%;background:var(--blue);transition:width .2s linear}
+.ws-h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px}
+.ws-h h2{font-size:16px;font-weight:700}
+.ws-h span{font-size:12.5px;color:var(--txt2)}
+.ws-up{display:flex;gap:14px;width:100%;text-align:left;padding:10px;margin:0 -10px;width:calc(100% + 20px);border-radius:12px;transition:background .15s}
+.ws-up:hover{background:var(--raised)}
+.ws-up .tn{position:relative;flex:none;width:92px;aspect-ratio:9/16;border-radius:10px;overflow:hidden;background:#181818}
+.ws-up .tn img,.ws-up .tn svg{width:100%;height:100%;object-fit:cover;display:block}
+.ws-up .tn .dur{position:absolute;right:5px;bottom:5px;background:rgba(0,0,0,.75);font-size:11px;font-weight:600;border-radius:4px;padding:1px 5px}
+.ws-up-l{font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--blue)}
+.ws-up-t{margin-top:4px;font-size:15.5px;line-height:1.32;font-weight:600;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.ws-up-m{margin-top:6px;font-size:12.5px;color:var(--txt2)}
+.ws-play{margin-top:10px;display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px 0 10px;border-radius:999px;background:#f1f1f1;color:#0f0f0f;font-size:13.5px;font-weight:700}
+.ws-list{list-style:none;display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.ws-item{display:flex;gap:12px;width:calc(100% + 16px);margin:0 -8px;padding:8px;border-radius:10px;text-align:left}
+.ws-item:hover{background:var(--raised)}
+.ws-item .tn{flex:none;width:54px;aspect-ratio:9/16;border-radius:7px;overflow:hidden;background:#181818}
+.ws-item .tn img,.ws-item .tn svg{width:100%;height:100%;object-fit:cover;display:block}
+.ws-item-t{font-size:14px;line-height:1.34;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ws-item-m{margin-top:4px;font-size:12px;color:var(--txt2)}
+.ws-tx summary{cursor:pointer;font-size:14.5px;font-weight:600;list-style:none;display:flex;align-items:center;justify-content:space-between}
+.ws-tx summary::-webkit-details-marker{display:none}
+.ws-tx summary::after{content:"Show";font-size:12.5px;font-weight:500;color:var(--txt2)}
+.ws-tx[open] summary::after{content:"Hide"}
+.ws-tx p{margin-top:10px;font-size:14px;line-height:1.62;color:#dcdcdc}
+.ws-keys{font-size:12px;color:var(--txt2);padding:2px 2px 8px}
+.ws-keys kbd{font:600 11px/1 var(--font);background:var(--raised);border:1px solid var(--line2);border-radius:5px;padding:3px 6px;color:var(--txt)}
+@media(min-width:1024px){
+  /* Feed on desktop: vertical cards that show the real 9:16 frame
+     (caption included) instead of a 16:9 crop of its middle third. */
+  .grid{grid-template-columns:repeat(auto-fill,minmax(196px,1fr));column-gap:18px;row-gap:30px}
+  .thumb .badge-dur{top:8px;bottom:auto}
+  .card .src-av{display:none}
+  .thumb{aspect-ratio:3/4}
+  .thumb img{object-position:50% 70%}
+  .card-title{font-size:15px;line-height:21px}
+  .thumb .hov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 70%;animation:fade .25s}
+}
 .pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
 /* ── slide panel (summary / quiz — one shared shell) ── */
 .pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:#212121;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.45);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
@@ -2228,14 +2299,31 @@ function GoogleModal({ onPick, onClose }) {
 
 /* ═══════════ 9 · VIEWS — feed, trending, saved, ask AI, simplify ════ */
 
+/* Desktop: hovering a card for a moment plays a silent preview of the
+   video in place, like YouTube. Mouse/trackpad only; touch never sees it. */
+const canHoverPreview = () => {
+  try { return window.matchMedia("(hover: hover) and (pointer: fine) and (min-width: 1024px)").matches; }
+  catch (e) { return false; }
+};
+
 function StoryCard({ story, onOpen, onCardMenu }) {
+  const [preview, setPreview] = React.useState(false);
+  const hoverRef = React.useRef(null);
+  const enter = () => {
+    if (!story.video_url || !canHoverPreview()) return;
+    hoverRef.current = setTimeout(() => setPreview(true), 450);
+  };
+  const leave = () => { clearTimeout(hoverRef.current); setPreview(false); };
+  React.useEffect(() => () => clearTimeout(hoverRef.current), []);
   return (
     <div className="card" onClick={onOpen} role="button" tabIndex={0}
+      onMouseEnter={enter} onMouseLeave={leave}
       onKeyDown={(e) => { if (e.key === "Enter") onOpen(); }}>
             <div className="thumb">
         {story.thumbnail_url
           ? <img src={story.thumbnail_url} alt="" loading="lazy" />
           : <ThumbArt story={story} />}
+        {preview && <video className="hov" src={story.video_url} muted autoPlay loop playsInline preload="auto" aria-hidden="true" />}
         <span className="badge-date">{dateBadge(story.publishedAt)}</span>
         <span className="badge-dur">{story.duration}</span>
       </div>
@@ -2991,6 +3079,8 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
   /* Scroll only the panel body. scrollIntoView can also scroll the page /
      iOS visual viewport, which made the whole sheet jump. */
   React.useEffect(() => {
+    // Nothing asked yet → stay at the top, so the summary reads from its start.
+    if (!thread.length && !busy) return;
     const body = endRef.current && endRef.current.parentElement;
     if (body) body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
   }, [thread, busy]);
@@ -3299,6 +3389,109 @@ function VideoGenPanel({ story, onClose }) {
 }
 
 /* ═════ 12 · PLAYER — fullscreen vertical story player (Shorts-style) ═ */
+/* Desktop side column of the watch page: what the story is and where it
+   came from, the quiz, a large "Up next", and the transcript (also keeps
+   the transcript text in the rendered page, which crawlers read). Only
+   rendered when the player is in its wide (≥1024px) layout. */
+function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, openQuiz, panel, setPanel, children }) {
+  const catIcon = (CATEGORIES.find((c) => c.id === story.category) || {}).icon || "globe";
+  const nextStory = list[index + 1];
+  const more = list.slice(index + 2, index + 8);
+  const remaining = Math.max(0, Math.ceil((story.durationSec || 30) * (1 - progress)));
+  const thumbOf = (s) => (s.thumbnail_url ? <img src={s.thumbnail_url} alt="" loading="lazy" /> : <ThumbArt story={s} />);
+  const unlockPct = Math.min(100, Math.round((progress / 0.9) * 100));
+  return (
+    <aside className="pl-side" aria-label="About this story">
+      <div className="ws-scroll">
+        <div>
+          <div className="ws-kick">
+            <span className="chip-cat"><Icon name={catIcon} size={14} stroke={2.2} /> {catLabel(story.category)}</span>
+            <span>{timeAgo(story.publishedAt)}</span>
+          </div>
+          <h1 className="ws-title">{story.headline}</h1>
+          <div className="ws-src">
+            <span>Source: <b>{story.source}</b></span>
+            <BiasTag bias={story.bias} />
+            <FactTag fact={story.fact} />
+          </div>
+          {story.url && (
+            <a className="ws-orig" href={story.url} target="_blank" rel="noopener">
+              Read the original at {story.source} <Icon name="externalLink" size={15} stroke={2} />
+            </a>
+          )}
+        </div>
+
+        <div className="ws-row">
+          <button className={cls("ws-btn", panel === "summary" && "on")} onClick={() => setPanel(panel === "summary" ? null : "summary")}>
+            <Icon name="comment" size={18} /> Summary &amp; Ask AI
+          </button>
+        </div>
+
+        {quiz && (
+          <div className="ws-card ws-quiz">
+            <span className="ic-wrap"><Icon name={quizUnlocked ? "bolt" : "lock"} size={20} /></span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="ws-quiz-t">Test yourself · {quiz.length} questions</div>
+              {quizUnlocked
+                ? <div className="ws-quiz-s">Unlocked — see how much you took in.</div>
+                : <>
+                    <div className="ws-quiz-s">Unlocks when you finish the video</div>
+                    <div className="ws-bar"><i style={{ width: unlockPct + "%" }} /></div>
+                  </>}
+            </div>
+            {quizUnlocked && <button className="ws-btn on" style={{ flex: "none", padding: "0 18px" }} onClick={openQuiz}>Take quiz</button>}
+          </div>
+        )}
+
+        {nextStory && (
+          <section>
+            <div className="ws-h">
+              <h2>Up next</h2>
+              <span>{progress > 0 && progress < 1 ? "Plays automatically in " + remaining + "s" : "Plays automatically"}</span>
+            </div>
+            <button className="ws-up" onClick={() => onJump(index + 1)} aria-label={"Watch next: " + nextStory.headline}>
+              <span className="tn">{thumbOf(nextStory)}<span className="dur">{nextStory.duration}</span></span>
+              <span style={{ minWidth: 0 }}>
+                <span className="ws-up-l">Next story</span>
+                <span className="ws-up-t" style={{ display: "-webkit-box" }}>{nextStory.headline}</span>
+                <span className="ws-up-m" style={{ display: "block" }}>{nextStory.source} · {catLabel(nextStory.category)}</span>
+                <span className="ws-play"><Icon name="play" size={16} /> Watch next</span>
+              </span>
+            </button>
+            {more.length > 0 && (
+              <ul className="ws-list">
+                {more.map((s, i) => (
+                  <li key={s.id}>
+                    <button className="ws-item" onClick={() => onJump(index + 2 + i)}>
+                      <span className="tn">{thumbOf(s)}</span>
+                      <span style={{ minWidth: 0 }}>
+                        <span className="ws-item-t" style={{ display: "-webkit-box" }}>{s.headline}</span>
+                        <span className="ws-item-m" style={{ display: "block" }}>{s.source} · {s.duration}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {story.script && (
+          <details className="ws-card ws-tx">
+            <summary>Transcript</summary>
+            <p>{story.script}</p>
+          </details>
+        )}
+
+        <div className="ws-keys">
+          <kbd>↓</kbd> next · <kbd>↑</kbd> previous · <kbd>Space</kbd> pause · <kbd>M</kbd> sound
+        </div>
+      </div>
+      {children}
+    </aside>
+  );
+}
+
 /* Once the visitor has turned sound on, every later video this visit
    starts with sound too (the page has had a user gesture by then, so
    browsers allow it). */
@@ -3345,6 +3538,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const touchRef = React.useRef(null);
   const videoRef = React.useRef(null);
   const hasVideo = !!story.video_url;
+  const wide = useViewport() >= 1024;
   const [muted, setMuted] = React.useState(() => initialMuted(resume, story.id));
 
   React.useEffect(() => { setPlaying(true); }, [story.id]);
@@ -3477,6 +3671,11 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   }, [index, onNavIndex]);
   // While muted, the first tap anywhere on the video turns sound on
   // rather than pausing — that is what the "Tap for sound" hint promises.
+  const jumpTo = (i) => {
+    if (i < 0 || i >= list.length || i === index) return;
+    setDir(i > index ? 1 : -1);
+    onNavIndex(i);
+  };
   const togglePlay = () => {
     if (hasVideo && muted) { unmute(); return; }
     setPlaying((p) => !p); setPpKey((k) => k + 1);
@@ -3492,11 +3691,14 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
       if (e.key === "ArrowDown") { e.preventDefault(); next(); }
       else if (e.key === "ArrowUp") { e.preventDefault(); prev(); }
       else if (e.key === " ") { e.preventDefault(); setPlaying((p) => !p); setPpKey((k) => k + 1); }
+      else if ((e.key === "m" || e.key === "M") && hasVideo && !/^(INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || "")) {
+        if (muted) unmute(); else setMuted(true);
+      }
       else if (e.key === "Escape") { if (panel) setPanel(null); else onClose(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [next, prev, panel, onClose]);
+  }, [next, prev, panel, onClose, muted, hasVideo]);
 
   const liked = userData.engagement.likedIds.includes(story.id);
   /* Quiz is locked until the video is watched — the same 90% point
@@ -3538,11 +3740,20 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 
   const catIcon = (CATEGORIES.find((c) => c.id === story.category) || {}).icon || "globe";
 
+  /* Summary / Quiz panels. On phones and tablets they sit where they
+     always have; in the wide layout they open over the side column. */
+  const panels = (
+    <>
+      {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} onChatOpen={pauseForChat} onChatClose={resumeAfterChat} />}
+      {panel === "quiz" && quiz && quizUnlocked && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
+    </>
+  );
+
   return (
-    <div className={cls("player", panel && "panel-open")}>
+    <div className={cls("player", panel && "panel-open", wide && "pl-wide")}>
       <div className="pl-close">
         <button className="ibtn" onClick={onClose} aria-label="Back to feed">
-          <Icon name="arrowLeft" size={22} />
+          <Icon name="arrowLeft" size={22} /><span className="pl-close-t">All stories</span>
         </button>
       </div>
 
@@ -3621,14 +3832,14 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
             </button>
             {liked ? "Liked" : "Like"}
           </div>
-          <div className="rail-btn">
+          <div className="rail-btn rail-sum">
             <button className="ibtn" onClick={() => setPanel(panel === "summary" ? null : "summary")}
               style={panel === "summary" ? { background: "var(--hover)" } : null} aria-label="Summary">
               <Icon name="comment" size={23} />
             </button>
             Summary
           </div>
-          <div className="rail-btn">
+          <div className="rail-btn rail-quiz">
             <button className="ibtn" onClick={openQuiz}
               style={panel === "quiz" ? { background: "var(--hover)" } : (!quiz || !quizUnlocked) ? { opacity: 0.6 } : null}
               aria-label={!quiz ? "No quiz for this one yet" : !quizUnlocked ? "Watch the video to unlock the quiz" : "Quiz"}
@@ -3655,8 +3866,12 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
         </button>
       </div>
 
-      {panel === "summary" && <SummaryPanel story={story} onClose={() => setPanel(null)} onChatOpen={pauseForChat} onChatClose={resumeAfterChat} />}
-      {panel === "quiz" && quiz && quizUnlocked && <QuizPanel story={story} user={user} dispatch={dispatch} onClose={() => setPanel(null)} />}
+      {wide ? (
+        <WatchSide story={story} list={list} index={index} onJump={jumpTo} progress={progress}
+          quiz={quiz} quizUnlocked={quizUnlocked} openQuiz={openQuiz} panel={panel} setPanel={setPanel}>
+          {panels}
+        </WatchSide>
+      ) : panels}
     </div>
   );
 }
@@ -3762,10 +3977,25 @@ function App({ handoff } = {}) {
       if (cancelled) return;
       setNewsVersion((v) => v + 1);
 
+      /* A story opened from a link used to be a list of one: no next
+         story, and playback simply stopped at the end. Once the feed is
+         here, queue the rest behind it — same category first, newest
+         first — so "next", auto-advance and Up next all work. */
+      const withNext = (s) => {
+        const others = newsService.all().filter((x) => x.id !== s.id && x.video_url);
+        const byNew = (a, b) => b.publishedAt - a.publishedAt;
+        return [
+          s,
+          ...others.filter((x) => x.category === s.category).sort(byNew),
+          ...others.filter((x) => x.category !== s.category).sort(byNew),
+        ];
+      };
       const deepId = storyIdFromPath();
       if (deepId && !handedOffRef.current) {
         const s = LIVE_CACHE.get(deepId) || (await storiesService.loadOne(deepId));
-        if (!cancelled && s) setPlayer({ list: [s], index: 0 });
+        if (!cancelled && s) setPlayer({ list: withNext(s), index: 0 });
+      } else if (handedOffRef.current && !cancelled) {
+        setPlayer((p) => (p && p.list.length === 1 ? { ...p, list: withNext(p.list[0]) } : p));
       }
     })();
     return () => { cancelled = true; };
