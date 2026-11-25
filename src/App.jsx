@@ -1462,12 +1462,13 @@ const CSS2 = `
 @media(min-width:1024px){
   /* Feed on desktop: vertical cards that show the real 9:16 frame
      (caption included) instead of a 16:9 crop of its middle third. */
-  .grid{grid-template-columns:repeat(auto-fill,minmax(196px,1fr));column-gap:18px;row-gap:30px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr));column-gap:18px;row-gap:30px}
   .thumb .badge-dur{top:8px;bottom:auto}
   .card .src-av{display:none}
+  .card .more{width:28px;margin-right:-8px}
   .thumb{aspect-ratio:3/4}
   .thumb img{object-position:50% 70%}
-  .card-title{font-size:15px;line-height:21px}
+  .card-title{font-size:15px;line-height:21px;-webkit-line-clamp:3}
   .thumb .hov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 70%;animation:fade .25s}
 }
 .pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
@@ -2330,7 +2331,7 @@ function StoryCard({ story, onOpen, onCardMenu }) {
       <div className="card-row">
         <SourceAvatar name={story.source} />
         <div className="card-body">
-          <div className="card-title">{story.headline}</div>
+          <div className="card-title" title={story.headline}>{story.headline}</div>
           <StoryMeta story={story} />
         </div>
         <button className="ibtn more" aria-label="More options"
@@ -3791,7 +3792,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
           <button className="pl-tap" onClick={togglePlay} aria-label={hasVideo && muted ? "Turn sound on" : playing ? "Pause" : "Play"} />
           {hasVideo && muted && (
             <button className="pl-sound" onClick={unmute} aria-label="Turn sound on">
-              <Icon name="volumeOff" size={17} stroke={2.2} /> Tap for sound
+              <Icon name="volumeOff" size={17} stroke={2.2} /> {wide ? "Click for sound" : "Tap for sound"}
             </button>
           )}
           <div className={cls("pl-topline", !chromeVisible && "pl-fade")}>

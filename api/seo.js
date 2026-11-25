@@ -232,6 +232,8 @@ const STATIC_CSS = `<style>
 .n30s h2{font-size:18px;margin:32px 0 12px}
 .n30s .hero{position:relative;width:min(100%,360px);aspect-ratio:9/16;margin:8px auto 20px;border-radius:14px;overflow:hidden;background:#000}
 .n30s .hero video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+.n30s .hero .t-click{display:none}
+@media(min-width:1024px){.n30s .hero .t-tap{display:none}.n30s .hero .t-click{display:inline}}
 .n30s .hero .sound{position:absolute;top:12px;left:12px;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:7px 13px;background:rgba(0,0,0,.62);color:#fff;font:600 13px/1 Roboto,system-ui,sans-serif;cursor:pointer}
 .n30s .meta,.n30s .note,.n30s time{color:#aaa;font-size:14px}
 .n30s .note{border-left:3px solid #8ab4f8;padding:8px 12px;background:#1a1a1a;border-radius:4px}
@@ -544,7 +546,7 @@ function heroVideo(videoUrl, image, headline) {
     ' autoplay muted playsinline preload="auto" width="720" height="1280"' +
     ' aria-label="' + esc("Video: " + (headline || "News story")) + '"></video>' +
     '<button type="button" class="sound" onclick="var v=this.parentNode.querySelector(\'video\');v.muted=false;v.play();this.remove()">' +
-    "🔇 Tap for sound</button>" +
+    '<span aria-hidden="true">🔇</span><span><span class="t-tap">Tap</span><span class="t-click">Click</span> for sound</span></button>' +
     "</div>"
   );
 }
