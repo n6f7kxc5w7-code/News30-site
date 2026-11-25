@@ -1396,7 +1396,7 @@ const CSS2 = `
 .pl-nav .ibtn{width:52px;height:52px}
 .pl-nav .ibtn:disabled{opacity:.32;cursor:default}
 .pl-nav .ibtn:disabled:hover{background:var(--raised)}
-.pl-sound{position:absolute;top:14px;left:0;right:0;margin:0 auto;width:max-content;z-index:2;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:8px 14px 8px 11px;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);color:#fff;font:600 13px/1 var(--font);cursor:pointer;animation:snd-in .3s ease,snd-pulse 2.4s ease-in-out .6s 3}
+.pl-sound{position:absolute;top:14px;left:0;right:0;margin:0 auto;width:max-content;z-index:4;touch-action:manipulation;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:8px 14px 8px 11px;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);color:#fff;font:600 13px/1 var(--font);cursor:pointer;animation:snd-in .3s ease,snd-pulse 2.4s ease-in-out .6s 3}
 .pl-sound:hover{background:rgba(0,0,0,.78)}
 @keyframes snd-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 @keyframes snd-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 0 7px rgba(255,255,255,0)}}
@@ -3540,9 +3540,22 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const videoRef = React.useRef(null);
   const hasVideo = !!story.video_url;
   const wide = useViewport() >= 1024;
+  const coarse = useCoarsePointer();
   const [muted, setMuted] = React.useState(() => initialMuted(resume, story.id));
+  // Set when a tap tried to turn sound on and the browser kept it muted.
+  const [soundBlocked, setSoundBlocked] = React.useState(false);
+  const lastUnmuteRef = React.useRef(0);
 
-  React.useEffect(() => { setPlaying(true); }, [story.id]);
+  /* The <video> actually on screen. videoRef normally is it; the lookup
+     is a guard so a gesture can never act on a detached element (e.g.
+     the server-rendered video replaced at handoff). */
+  const getVideo = () => {
+    const v = videoRef.current;
+    if (v && v.isConnected) return v;
+    return document.querySelector(".player video.pl-vid");
+  };
+
+  React.useEffect(() => { setPlaying(true); setSoundBlocked(false); }, [story.id]);
 
   /* Headline and category pill fade out 2s into playback and return the
      moment it's paused, so they don't sit on top of the burned-in
@@ -3594,13 +3607,46 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   /* Unmute inside the tap itself — browsers only allow sound from within
      a user gesture, so this must not wait for an effect. */
   const unmute = () => {
+    lastUnmuteRef.current = Date.now();
     soundOnThisVisit = true;
     setMuted(false);
-    const v = videoRef.current;
+    const v = getVideo();
     if (v) {
       v.muted = false;
       if (v.paused) v.play().catch(() => {});
+      // If the browser kept it muted (or stopped it), say so plainly and
+      // let the next tap on the video itself try again.
+      setTimeout(() => {
+        const el = getVideo();
+        if (!el) return;
+        if (el.muted) { setMuted(true); setSoundBlocked(true); }
+        else setSoundBlocked(false);
+        if (el.paused) setPlaying(false);
+      }, 400);
     }
+    setPlaying(true);
+  };
+  /* Touch: act on pointerup (a user-activation event in every browser)
+     rather than waiting for the synthesized click, which iPadOS can
+     drop or delay. Mouse keeps using click. unmute() is idempotent, so
+     both firing for one tap is harmless. */
+  const soundUp = (e) => { if (e.pointerType !== "mouse") { e.stopPropagation(); unmute(); } };
+  const soundClick = (e) => { e.stopPropagation(); unmute(); };
+
+  /* Safari fades audio out on pause and back in on play, which swallows
+     the first words after a resume. So after any pause longer than half
+     a second, resume 0.7s earlier. Stored on the element, so a pause
+     event from a previous story's video can't affect the next one. */
+  const onVideoPause = (e) => {
+    const el = e.currentTarget;
+    if (!el.ended) el.__n30PausedAt = Date.now();
+    setPlaying(false);
+  };
+  const onVideoPlay = (e) => {
+    const el = e.currentTarget;
+    const t = el.__n30PausedAt;
+    el.__n30PausedAt = 0;
+    if (t && Date.now() - t > 500 && el.currentTime > 0.05) el.currentTime = Math.max(0, el.currentTime - 0.7);
     setPlaying(true);
   };
 
@@ -3677,9 +3723,24 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
     setDir(i > index ? 1 : -1);
     onNavIndex(i);
   };
+  /* Play/pause straight on the element inside the tap: on iPadOS a
+     play() made later from an effect is outside the gesture and can be
+     refused once sound is on. */
   const togglePlay = () => {
+    if (Date.now() - lastUnmuteRef.current < 700) return; // same tap already unmuted
     if (hasVideo && muted) { unmute(); return; }
-    setPlaying((p) => !p); setPpKey((k) => k + 1);
+    const v = hasVideo ? getVideo() : null;
+    if (v) {
+      if (v.paused) { v.play().catch(() => {}); setPlaying(true); }
+      else { v.pause(); setPlaying(false); }
+    } else {
+      setPlaying((p) => !p);
+    }
+    setPpKey((k) => k + 1);
+  };
+  const tapUp = (e) => {
+    if (e.pointerType === "mouse" || !(hasVideo && muted)) return;
+    unmute();
   };
   /* Mobile Ask AI chat: pause while it's open, resume from the same spot
      on close if it was playing before. */
@@ -3782,17 +3843,19 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
                 if (el.duration) setProgress(story.id, el.currentTime / el.duration);
               }}
               onEnded={() => setProgress(story.id, 1)}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
+              onPlay={onVideoPlay}
+              onPause={onVideoPause}
+              onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
             />
           ) : (
             <ThumbArt story={story} variant="video" paused={!playing} />
           )}
           <div className="pl-grad" />
-          <button className="pl-tap" onClick={togglePlay} aria-label={hasVideo && muted ? "Turn sound on" : playing ? "Pause" : "Play"} />
+          <button className="pl-tap" onPointerUp={tapUp} onClick={togglePlay} aria-label={hasVideo && muted ? "Turn sound on" : playing ? "Pause" : "Play"} />
           {hasVideo && muted && (
-            <button className="pl-sound" onClick={unmute} aria-label="Turn sound on">
-              <Icon name="volumeOff" size={17} stroke={2.2} /> {wide ? "Click for sound" : "Tap for sound"}
+            <button className="pl-sound" onPointerUp={soundUp} onClick={soundClick} aria-label="Turn sound on">
+              <Icon name="volumeOff" size={17} stroke={2.2} />{" "}
+              {soundBlocked ? "Tap the video for sound" : wide && !coarse ? "Click for sound" : "Tap for sound"}
             </button>
           )}
           <div className={cls("pl-topline", !chromeVisible && "pl-fade")}>
@@ -3878,6 +3941,22 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
 }
 
 /* ═══════════════════ 13 · APP ROOT — state + wiring ════════════════ */
+
+/* Touch-first device (phone, tablet — including an iPad that reports
+   itself as a Mac). Decides "Tap" vs "Click" wording. */
+function useCoarsePointer() {
+  const q = "(pointer: coarse)";
+  const get = () => { try { return window.matchMedia(q).matches; } catch (e) { return false; } };
+  const [coarse, setCoarse] = React.useState(get);
+  React.useEffect(() => {
+    let mq;
+    try { mq = window.matchMedia(q); } catch (e) { return; }
+    const on = () => setCoarse(mq.matches);
+    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    return () => (mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on));
+  }, []);
+  return coarse;
+}
 
 function useViewport() {
   const [w, setW] = React.useState(typeof window !== "undefined" ? window.innerWidth : 1280);
