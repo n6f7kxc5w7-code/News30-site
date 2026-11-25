@@ -149,7 +149,7 @@ async function sbSelect(query, { from, to, key: keyOverride } = {}) {
 
 const LIST_COLS = "id,headline,category,source,created_at";
 const STORY_COLS =
-  "id,headline,script,category,source,article_url,article_published,created_at,thumbnail_url,video_url,duration_seconds";
+  "id,headline,script,category,source,article_url,article_published,created_at,thumbnail_url,video_url,duration_seconds,quiz";
 
 // Latest ready stories (light columns), memoised briefly per instance.
 let latestMemo = { at: 0, rows: null };
@@ -230,6 +230,9 @@ const STATIC_CSS = `<style>
 .n30s nav a{color:#ccc;text-decoration:none;margin-right:16px;font-weight:500}
 .n30s h1{font-size:28px;line-height:1.25;margin:4px 0 12px}
 .n30s h2{font-size:18px;margin:32px 0 12px}
+.n30s .hero{position:relative;width:min(100%,360px);aspect-ratio:9/16;margin:8px auto 20px;border-radius:14px;overflow:hidden;background:#000}
+.n30s .hero video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+.n30s .hero .sound{position:absolute;top:12px;left:12px;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:7px 13px;background:rgba(0,0,0,.62);color:#fff;font:600 13px/1 Roboto,system-ui,sans-serif;cursor:pointer}
 .n30s .meta,.n30s .note,.n30s time{color:#aaa;font-size:14px}
 .n30s .note{border-left:3px solid #8ab4f8;padding:8px 12px;background:#1a1a1a;border-radius:4px}
 .n30s .kicker{text-transform:uppercase;letter-spacing:.06em;font-size:13px;font-weight:700;margin:0}
@@ -529,6 +532,39 @@ function watchShelf(rows, { lazy }) {
   );
 }
 
+/* The video, first thing on the page and playing before any JavaScript:
+   muted autoplay is the only kind browsers allow on arrival, and the
+   captions are burned in, so it reads without sound. The button
+   unmutes it. main.jsx then hands the same video (and its playback
+   position) to the app's player, which takes over the page. */
+function heroVideo(videoUrl, image, headline) {
+  return (
+    '<div class="hero">' +
+    '<video data-n30-hero src="' + esc(videoUrl) + '"' + (image ? ' poster="' + esc(image) + '"' : "") +
+    ' autoplay muted playsinline preload="auto" width="720" height="1280"' +
+    ' aria-label="' + esc("Video: " + (headline || "News story")) + '"></video>' +
+    '<button type="button" class="sound" onclick="var v=this.parentNode.querySelector(\'video\');v.muted=false;v.play();this.remove()">' +
+    "🔇 Tap for sound</button>" +
+    "</div>"
+  );
+}
+
+/* The row the player needs, so main.jsx can open it on the app's first
+   render instead of after a network round-trip. Same escaping as JSON-LD. */
+function storyHandoff(row) {
+  const data = {
+    id: row.id, headline: row.headline, source: row.source, category: row.category,
+    article_url: row.article_url, article_published: row.article_published, created_at: row.created_at,
+    script: row.script, video_url: row.video_url, thumbnail_url: row.thumbnail_url,
+    duration_seconds: row.duration_seconds, quiz: row.quiz || null,
+  };
+  return (
+    '<script type="application/json" id="n30-story">' +
+    JSON.stringify(data).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026") +
+    "</script>"
+  );
+}
+
 async function storyPage(req, res) {
   const { segment, uuid } = storyRequest(req);
   if (!uuid) return notFound(req, res);
@@ -574,11 +610,19 @@ async function storyPage(req, res) {
   const thin = words < THIN_WORDS;
   const published = isoDate(row.created_at);
   const originalPublished = isoDate(row.article_published);
-  const description = truncate(
+  const summary = truncate(
     script || "A 30-second AI-condensed summary of " + src + "'s report: " + (row.headline || ""),
     158
   );
-  const title = truncate(row.headline || "News story", 90) + " | " + SITE_NAME;
+  /* Video pages tell searchers up front that this is a 30-second video,
+     not an article, so the people who click are the ones who want one.
+     The headline is capped shorter so the suffix survives Google's
+     ~60-70 character cut more often. Expired-video pages keep the
+     original title and description. */
+  const title = videoUrl
+    ? truncate(row.headline || "News story", 70) + " — 30-second video"
+    : truncate(row.headline || "News story", 90) + " | " + SITE_NAME;
+  const description = videoUrl ? "Watch: " + truncate(summary, 151) : summary;
 
   const article = {
     "@type": "NewsArticle",
@@ -586,7 +630,7 @@ async function storyPage(req, res) {
     mainEntityOfPage: canonical,
     url: canonical,
     headline: truncate(row.headline || "News story", 110),
-    description,
+    description: summary,
     articleSection: catInfo.label,
     inLanguage: "en",
     datePublished: published || undefined,
@@ -601,13 +645,18 @@ async function storyPage(req, res) {
   };
   const graph = [article, orgLd()];
   if (videoUrl) {
+    /* Google's video result needs name, thumbnailUrl and uploadDate, and
+       uses duration + contentUrl for the duration badge and key moments.
+       All four are always set here: uploadDate falls back to the
+       original article's date, then to now; thumbnailUrl to the
+       branded default image. */
     const video = {
       "@type": "VideoObject",
       "@id": canonical + "#video",
       name: row.headline || "News story",
-      description,
+      description: summary,
       thumbnailUrl: [metaImage],
-      uploadDate: published || undefined,
+      uploadDate: published || originalPublished || new Date().toISOString(),
       duration: isoDuration(row.duration_seconds),
       contentUrl: videoUrl,
       transcript: script || undefined,
@@ -648,10 +697,11 @@ async function storyPage(req, res) {
       ? ' (originally reported <time datetime="' + originalPublished + '">' + esc(humanDate(row.article_published)) + "</time>)"
       : "") +
     "</p>" +
+    (videoUrl ? heroVideo(videoUrl, image, row.headline) : "") +
     '<p class="note">This is an AI-condensed summary of reporting by ' + sourceLink +
     ". Read the original article for the full story.</p>" +
     watchShelf(watchRows, { lazy: false }) +
-    (image ? '<img class="thumb" src="' + esc(image) + '" alt="' + esc(row.headline || "") + '" width="1280" height="720" />' : "") +
+    (!videoUrl && image ? '<img class="thumb" src="' + esc(image) + '" alt="' + esc(row.headline || "") + '" width="1280" height="720" />' : "") +
     (script ? "<h2>Transcript</h2>\n" + scriptParagraphs(script) : "") +
     (articleUrl
       ? '<p><a href="' + esc(articleUrl) + '" rel="noopener" target="_blank">Read the original article at ' + esc(src) + " →</a></p>"
@@ -659,7 +709,8 @@ async function storyPage(req, res) {
     "</article>" +
     watchShelf(watchRows, { lazy: true }) +
     (related.length ? "<h2>More " + esc(catInfo.label.toLowerCase()) + " stories</h2>" + storyList(related) : "") +
-    "</main>" + siteFooter() + "</div>";
+    "</main>" + siteFooter() + "</div>" +
+    (videoUrl ? storyHandoff(row) : "");
 
   // data-video="0": the video has been deleted — main.jsx leaves this
   // page as-is instead of mounting the feed over the transcript.

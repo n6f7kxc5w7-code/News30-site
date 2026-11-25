@@ -321,6 +321,7 @@ const ICONS = {
   comment: <><path d="M12 3C6.5 3 2 6.9 2 11.7c0 2.6 1.3 4.9 3.4 6.5L4 22l4.6-2.2c1 .3 2.2.5 3.4.5 5.5 0 10-3.9 10-8.6S17.5 3 12 3z" /><path d="M8 10.3h8" /><path d="M8 13.3h5.5" /></>,
   bolt: <path d="M13 2 4.8 13.2h4.9L11 22l8.2-11.2h-4.9z" />,
   share: <path d="M14.5 9.1V5.2L21 12l-6.5 6.8v-3.9c-4.6 0-8 1.5-10.5 4.6.9-5.6 4.5-9.7 10.5-10.4z" />,
+  volumeOff: <path d="M11 5 6 9H3v6h3l5 4zM22 9l-6 6M16 9l6 6" />,
   arrowUp: <><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></>,
   arrowDown: <><path d="M12 5v14" /><path d="M18 13l-6 6-6-6" /></>,
   arrowLeft: <><path d="M19 12H5" /><path d="M11 6l-6 6 6 6" /></>,
@@ -1394,6 +1395,10 @@ const CSS2 = `
 .pl-nav .ibtn{width:52px;height:52px}
 .pl-nav .ibtn:disabled{opacity:.32;cursor:default}
 .pl-nav .ibtn:disabled:hover{background:var(--raised)}
+.pl-sound{position:absolute;top:14px;left:0;right:0;margin:0 auto;width:max-content;z-index:2;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:8px 14px 8px 11px;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);color:#fff;font:600 13px/1 var(--font);cursor:pointer;animation:snd-in .3s ease,snd-pulse 2.4s ease-in-out .6s 3}
+.pl-sound:hover{background:rgba(0,0,0,.78)}
+@keyframes snd-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+@keyframes snd-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 0 7px rgba(255,255,255,0)}}
 .pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
 /* ── slide panel (summary / quiz — one shared shell) ── */
 .pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:#212121;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.45);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
@@ -3294,7 +3299,29 @@ function VideoGenPanel({ story, onClose }) {
 }
 
 /* ═════ 12 · PLAYER — fullscreen vertical story player (Shorts-style) ═ */
-function Player({ story, list, index, onNavIndex, onClose, user, userData, dispatch, toast }) {
+/* Once the visitor has turned sound on, every later video this visit
+   starts with sound too (the page has had a user gesture by then, so
+   browsers allow it). */
+let soundOnThisVisit = false;
+
+/* Muted autoplay is the only kind every browser allows on arrival (for
+   example from a Google result), and the captions are burned in, so the
+   video reads without sound. Start with sound only when the page has
+   already had a tap/click (opening a card from the feed). Browsers
+   without navigator.userActivation try with sound and fall back to
+   muted if play() is refused. */
+function initialMuted(resume, storyId) {
+  if (soundOnThisVisit) return false;
+  if (resume && resume.id === storyId) return !!resume.muted;
+  try {
+    const ua = typeof navigator !== "undefined" && navigator.userActivation;
+    return ua ? !ua.hasBeenActive : false;
+  } catch (e) {
+    return true;
+  }
+}
+
+function Player({ story, list, index, onNavIndex, onClose, user, userData, dispatch, toast, resume }) {
   const [playing, setPlaying] = React.useState(true);
   /* Progress is stored with the id of the story it belongs to, so the
      render where story.id changes already reads 0. (Resetting it in an
@@ -3318,6 +3345,7 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const touchRef = React.useRef(null);
   const videoRef = React.useRef(null);
   const hasVideo = !!story.video_url;
+  const [muted, setMuted] = React.useState(() => initialMuted(resume, story.id));
 
   React.useEffect(() => { setPlaying(true); }, [story.id]);
 
@@ -3347,10 +3375,49 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
      state and the tap overlay starts it on the first touch. */
   React.useEffect(() => {
     const v = videoRef.current;
+    if (v) v.muted = muted;
+  }, [muted, story.id]);
+  React.useEffect(() => {
+    const v = videoRef.current;
     if (!v) return;
-    if (playing) v.play().catch(() => setPlaying(false));
-    else v.pause();
+    if (playing) {
+      v.play().catch(() => {
+        // Refused with sound → retry muted (with the "Tap for sound"
+        // hint). Refused even muted (e.g. data saver) → paused, and the
+        // tap overlay starts it.
+        if (!v.muted) {
+          v.muted = true;
+          setMuted(true);
+          v.play().catch(() => setPlaying(false));
+        } else {
+          setPlaying(false);
+        }
+      });
+    } else v.pause();
   }, [playing, story.id]);
+
+  /* Unmute inside the tap itself — browsers only allow sound from within
+     a user gesture, so this must not wait for an effect. */
+  const unmute = () => {
+    soundOnThisVisit = true;
+    setMuted(false);
+    const v = videoRef.current;
+    if (v) {
+      v.muted = false;
+      if (v.paused) v.play().catch(() => {});
+    }
+    setPlaying(true);
+  };
+
+  /* Story pages hand over the server-rendered video's position, so the
+     player continues from the same second instead of restarting. */
+  const resumedRef = React.useRef(false);
+  const onLoadedMetadata = (e) => {
+    if (resumedRef.current || !resume || resume.id !== story.id) return;
+    resumedRef.current = true;
+    const el = e.currentTarget;
+    if (resume.time > 0.3 && el.duration && resume.time < el.duration - 1) el.currentTime = resume.time;
+  };
 
   /* auto-advance to the next story when this one ends */
   React.useEffect(() => {
@@ -3408,7 +3475,12 @@ function Player({ story, list, index, onNavIndex, onClose, user, userData, dispa
   const prev = React.useCallback(() => {
     if (index > 0) { setDir(-1); onNavIndex(index - 1); }
   }, [index, onNavIndex]);
-  const togglePlay = () => { setPlaying((p) => !p); setPpKey((k) => k + 1); };
+  // While muted, the first tap anywhere on the video turns sound on
+  // rather than pausing — that is what the "Tap for sound" hint promises.
+  const togglePlay = () => {
+    if (hasVideo && muted) { unmute(); return; }
+    setPlaying((p) => !p); setPpKey((k) => k + 1);
+  };
   /* Mobile Ask AI chat: pause while it's open, resume from the same spot
      on close if it was playing before. */
   const resumeRef = React.useRef(false);
@@ -3490,7 +3562,9 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
               poster={story.thumbnail_url || undefined}
               playsInline
               autoPlay
+              muted={muted}
               preload="auto"
+              onLoadedMetadata={onLoadedMetadata}
               onTimeUpdate={(e) => {
                 const el = e.currentTarget;
                 if (el.duration) setProgress(story.id, el.currentTime / el.duration);
@@ -3503,7 +3577,12 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
             <ThumbArt story={story} variant="video" paused={!playing} />
           )}
           <div className="pl-grad" />
-          <button className="pl-tap" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} />
+          <button className="pl-tap" onClick={togglePlay} aria-label={hasVideo && muted ? "Turn sound on" : playing ? "Pause" : "Play"} />
+          {hasVideo && muted && (
+            <button className="pl-sound" onClick={unmute} aria-label="Turn sound on">
+              <Icon name="volumeOff" size={17} stroke={2.2} /> Tap for sound
+            </button>
+          )}
           <div className={cls("pl-topline", !chromeVisible && "pl-fade")}>
             <span className="pl-cat"><Icon name={catIcon} size={14} stroke={2.2} /> {catLabel(story.category)}</span>
           </div>
@@ -3597,7 +3676,7 @@ function useViewport() {
 /* 🔌 Real notifications will be pushed from the ingest worker; until then
    the bell starts empty rather than showing sample stories. */
 const seedNotifications = () => [];
-function App() {
+function App({ handoff } = {}) {
   const vw = useViewport();
   const mobile = vw < 768;
   const canFull = vw >= 1100;
@@ -3618,7 +3697,15 @@ function App() {
   const [cardMenu, setCardMenu] = React.useState(null); // { x, y, story }
   const [googleOpen, setGoogleOpen] = React.useState(false);
 
-  const [player, setPlayer] = React.useState(null); // { list, index }
+  /* A story page hands over its row (see main.jsx), so the player is open
+     from the very first render: no feed flash, no wait for the network. */
+  const [player, setPlayer] = React.useState(() => {
+    const row = handoff && handoff.row;
+    if (!row || !row.id || !row.video_url) return null;
+    const s = mapPublishedStory(row);
+    return { list: [s], index: 0, resume: { id: s.id, time: handoff.time || 0, muted: handoff.muted !== false } };
+  }); // { list, index, resume? }
+  const handedOffRef = React.useRef(!!(handoff && handoff.row && handoff.row.video_url));
   const [fresh, setFresh] = React.useState([]);     // breaking stories prepended to feed
 
   const [query, setQuery] = React.useState("");
@@ -3676,7 +3763,7 @@ function App() {
       setNewsVersion((v) => v + 1);
 
       const deepId = storyIdFromPath();
-      if (deepId) {
+      if (deepId && !handedOffRef.current) {
         const s = LIVE_CACHE.get(deepId) || (await storiesService.loadOne(deepId));
         if (!cancelled && s) setPlayer({ list: [s], index: 0 });
       }
@@ -3895,6 +3982,7 @@ is restored when the player closes. */
           story={player.list[player.index]}
           list={player.list}
           index={player.index}
+          resume={player.resume}
           onNavIndex={(i) => setPlayer((p) => ({ ...p, index: i }))}
           onClose={() => {
             setPlayer(null);

@@ -21,9 +21,29 @@ if (legacy) {
   inject();
   analytics.sessionStart();
 } else {
+  /* Story page with a live video: the server already rendered the story
+     row and a muted, autoplaying copy of the video. Read both before
+     React replaces that markup, so the player opens on the first render
+     and carries on from the same second (and with sound, if the visitor
+     already tapped for it) instead of flashing the feed and restarting. */
+  let handoff = null;
+  try {
+    const json = document.getElementById("n30-story");
+    if (json && rootEl.dataset.story) {
+      const hero = rootEl.querySelector("video[data-n30-hero]");
+      handoff = {
+        row: JSON.parse(json.textContent),
+        time: hero && Number.isFinite(hero.currentTime) ? hero.currentTime : 0,
+        muted: hero ? hero.muted : true,
+      };
+      if (hero) hero.pause();
+    }
+  } catch (e) {
+    handoff = null; // fall back to the normal deep-link fetch
+  }
   createRoot(rootEl).render(
     <React.StrictMode>
-      <App />
+      <App handoff={handoff} />
     </React.StrictMode>
   );
 }
