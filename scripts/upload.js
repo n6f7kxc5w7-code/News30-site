@@ -1,6 +1,7 @@
 // scripts/upload.js
 // 📤 STAGE 3 OF THE PIPELINE — takes finished renders and puts them on
-// YouTube as PRIVATE drafts. Run by .github/workflows/upload.yml.
+// YouTube as PRIVATE videos scheduled to publish themselves
+// PUBLISH_DELAY_HOURS later. Run by .github/workflows/upload.yml.
 //
 // Deliberately NOT a Vercel function. A resumable video upload is a
 // multi-megabyte PUT that can take a minute on its own, on top of a
@@ -15,11 +16,17 @@
 // different class of problem from a bad retention curve, and it goes
 // out under a real name on a real channel.
 //
-// So this automates the mechanical part (render → upload → metadata)
-// and stops at the one step that needs judgement. Reviewing a batch of
-// private drafts in Studio and scheduling the good ones takes about two
-// minutes, once. That is the whole point: kill the daily grind, keep
-// the safety net.
+// So every video goes up private with status.publishAt set to
+// PUBLISH_DELAY_HOURS (default 3) after upload, and YouTube publishes it
+// automatically at that time. That delay IS the safety net now: it is
+// the window to watch the draft in Studio and stop a bad one (open it →
+// Visibility → Private, which clears the schedule) before it goes out.
+// Nothing stops a video that nobody looks at — set PUBLISH_DELAY_HOURS
+// to a window you will actually check.
+//
+// publishAt only works for videos the channel is allowed to make public:
+// uploads from an API project that hasn't passed YouTube's API audit are
+// locked to private, and then the schedule never takes effect.
 //
 // ─── QUOTA IS THE BINDING CONSTRAINT ────────────────────────────────
 // A videos.insert costs 1600 quota units. The default daily allowance
@@ -28,6 +35,9 @@
 // upload that retries still spends the quota. MAX_PER_RUN exists to
 // make that ceiling explicit rather than something you discover at 3am
 // via a 403.
+//
+// Optional repo variable: PUBLISH_DELAY_HOURS (hours from upload to
+// automatic publish, default 3; fractions allowed, e.g. 0.5).
 //
 // Required GitHub repo secrets:
 //   YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN
@@ -63,6 +73,20 @@ const MAX_PER_RUN = 3;
 // stories a day than the quota can upload, so the old oldest-first
 // queue meant every draft was already 2–3 days stale.
 const MAX_AGE_HOURS = 36;
+
+// Hours from upload to YouTube's automatic publish. Anything that isn't a
+// positive number (unset, "", "abc", "0", "-1") falls back to 3, with a
+// warning if something was set: publishAt must be in the future, and a
+// typo must never mean "publish immediately".
+const DEFAULT_PUBLISH_DELAY_HOURS = 3;
+const PUBLISH_DELAY_HOURS = (() => {
+  const raw = (process.env.PUBLISH_DELAY_HOURS || "").trim();
+  if (!raw) return DEFAULT_PUBLISH_DELAY_HOURS;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  console.warn("[upload] ⚠️ PUBLISH_DELAY_HOURS=" + JSON.stringify(raw) + " is not a positive number — using " + DEFAULT_PUBLISH_DELAY_HOURS);
+  return DEFAULT_PUBLISH_DELAY_HOURS;
+})();
 
 const {
   YOUTUBE_CLIENT_ID,
@@ -132,16 +156,21 @@ async function uploadOne(story, accessToken) {
   // problem it logs a warning and hands back the original bytes.
   const { bytes } = await makeYouTubeVersion(original, { getClip: getCtaClip });
 
+  // ISO 8601 UTC, e.g. 2026-11-26T14:05:00.000Z. Computed per video, just
+  // before its upload starts.
+  const publishAt = new Date(Date.now() + PUBLISH_DELAY_HOURS * 3600 * 1000).toISOString();
+
   const metadata = {
     // title (youtube_title or cleaned headline + " #Shorts"), description
     // (summary → site link → script → source → hashtags), tags, category
     // 17 Sports / 25 News & Politics, language "en".
     snippet: buildSnippet(story),
     status: {
-      // The whole safety argument in one field. Do not change this to
-      // "public" without replacing the human review step with something
-      // else that catches a wrong claim about a named person.
+      // Private until publishAt, then YouTube makes it public by itself.
+      // YouTube only honours publishAt on private videos, so this must
+      // stay "private". Do not set "public": that skips the review window.
       privacyStatus: "private",
+      publishAt,
       selfDeclaredMadeForKids: false,
     },
   };
@@ -187,7 +216,7 @@ async function uploadOne(story, accessToken) {
     throw new Error("upload failed (" + putRes.status + "): " + JSON.stringify(result).slice(0, 200));
   }
 
-  return result.id;
+  return { id: result.id, publishAt };
 }
 
 async function main() {
@@ -244,7 +273,7 @@ async function main() {
   for (const story of stories) {
     console.log("[upload] →", (story.headline || "").slice(0, 70));
     try {
-      const youtubeId = await uploadOne(story, accessToken);
+      const { id: youtubeId, publishAt } = await uploadOne(story, accessToken);
 
       await supabase
         .from("published_stories")
@@ -256,7 +285,8 @@ async function main() {
         .eq("id", story.id);
 
       uploaded++;
-      console.log("[upload] ✅ private draft: https://studio.youtube.com/video/" + youtubeId + "/edit");
+      console.log("[upload] ✅ uploaded (private): https://studio.youtube.com/video/" + youtubeId + "/edit");
+      console.log("[upload]    publishes automatically at " + publishAt + " (in " + PUBLISH_DELAY_HOURS + "h)");
     } catch (e) {
       const message = String(e.message || e);
 
@@ -284,7 +314,10 @@ async function main() {
   // of a green tick hiding a dead pipeline for days.
   if (failed && !uploaded) process.exit(1);
   if (uploaded) {
-    console.log("[upload] review them at https://studio.youtube.com → Content → filter by Private");
+    console.log(
+      "[upload] they publish themselves in " + PUBLISH_DELAY_HOURS + "h. To stop one, open it in Studio → " +
+      "Visibility → Private (clears the schedule): https://studio.youtube.com → Content"
+    );
   }
 }
 
