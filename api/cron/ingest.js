@@ -41,6 +41,7 @@
 // Requires: alter table published_stories add column if not exists description text;
 
 import { createClient } from "@supabase/supabase-js";
+import { storyCategory } from "../../src/category.js";
 
 const CATEGORY_MAP = {
   geopolitics: "general",
@@ -702,9 +703,12 @@ export default async function handler(req, res) {
       console.log("[ingest]", category, "with summary:", withSummary + "/" + top.length);
 
       // Slot 1 is the lead story for the category.
+      /* The feed is only a starting point: NewsAPI's `general` feed (our
+         geopolitics source) is a catch-all, so shopping, markets and
+         sport land in it too. The headline and description decide. */
       const rows = top.map((t, i) => ({
         article_url: t.article.url,
-        category,
+        category: storyCategory({ category, headline: t.article.title, description: t.description }),
         headline: cleanHeadline(t.article.title),
         /* NewsAPI's own one-or-two-sentence summary. Previously thrown
            away, which left DeepSeek writing 65-75 word scripts from a

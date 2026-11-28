@@ -20,6 +20,7 @@
 // (default https://www.news30.live), optional GOOGLE_SITE_VERIFICATION.
 
 import { storyPath, uuidFromSlug } from "../src/slug.js";
+import { storyCategory } from "../src/category.js";
 
 const SITE_URL = (process.env.SITE_URL || "https://www.news30.live").replace(/\/+$/, "");
 const SITE_NAME = "News30";
@@ -45,13 +46,7 @@ const CATEGORIES = {
     description: "The latest sports results and stories, each condensed by AI into a 30-second summary with the original source credited.",
   },
 };
-// Same mapping as CATEGORY_ALIASES in src/App.jsx.
-const CATEGORY_ALIASES = {
-  geopolitics: "geopolitics", world: "geopolitics", politics: "geopolitics", general: "geopolitics",
-  finance: "finance", business: "finance", markets: "finance", economy: "finance",
-  sports: "sports", sport: "sports",
-};
-const normaliseCategory = (c) => CATEGORY_ALIASES[String(c || "").toLowerCase()] || "geopolitics";
+// Category from content, same as the app (src/category.js).
 
 const HOME_TITLE = "News30 — AI-condensed news in 30 seconds";
 const HOME_DESCRIPTION =
@@ -184,8 +179,8 @@ const FALLBACK_TEMPLATE = `<!doctype html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta name="theme-color" content="#0f0f0f" />
-<style>html,body{background:#0f0f0f}</style>
+<meta name="theme-color" content="#14262b" />
+<style>html,body{background:#14262b}</style>
 <!-- seo:start --><!-- seo:end -->
 </head>
 <body><div id="root"></div></body>
@@ -221,51 +216,56 @@ function render(template, { head, body, rootAttrs = "" }) {
 // Styles for the server-rendered markup. Scoped to .n30s; harmless once
 // React has replaced it. Also what visitors see on a story whose video
 // has expired (main.jsx doesn't mount the app over those).
-const STATIC_CSS = `<style>
-.n30s{color:#f1f1f1;font:16px/1.6 Roboto,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;max-width:760px;margin:0 auto;padding:16px 16px 48px}
-.n30s a{color:#8ab4f8}
-.n30s header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;padding:8px 0 20px;border-bottom:1px solid #303030;margin-bottom:24px}
-.n30s .brand{font-weight:800;font-size:22px;color:#fff;text-decoration:none}
-.n30s .brand b{color:#ff3b30}
-.n30s nav a{color:#ccc;text-decoration:none;margin-right:16px;font-weight:500}
-.n30s h1{font-size:28px;line-height:1.25;margin:4px 0 12px}
-.n30s h2{font-size:18px;margin:32px 0 12px}
-.n30s .hero{position:relative;width:min(100%,360px);aspect-ratio:9/16;margin:8px auto 20px;border-radius:14px;overflow:hidden;background:#000}
-.n30s .hero video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+const STATIC_CSS = `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" />
+<style>
+.n30s{--bg:#14262b;--raised:#1c3339;--line:rgba(237,233,224,.14);--txt:#ede9e0;--txt2:#9db0b0;--clock:#f2a93b;--serif:Newsreader,Georgia,serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;color:var(--txt);font:16px/1.6 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Arial,sans-serif;max-width:760px;margin:0 auto;padding:16px 16px 48px}
+.n30s a{color:var(--txt);text-decoration:underline;text-decoration-color:var(--txt2);text-underline-offset:3px}
+.n30s a:hover{text-decoration-color:var(--txt)}
+.n30s header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;padding:8px 0 20px;border-bottom:1px solid var(--line);margin-bottom:24px}
+.n30s .brand{font:600 25px/1 var(--serif);color:var(--txt);text-decoration:none}
+.n30s .brand b{font-family:var(--mono);font-weight:500;color:var(--clock)}
+.n30s nav a{color:var(--txt2);text-decoration:none;margin-right:16px;font-weight:500}
+.n30s nav a:hover{color:var(--txt)}
+.n30s h1{font:600 31px/1.18 var(--serif);margin:4px 0 12px}
+.n30s h2{font:600 20px/1.3 var(--serif);margin:32px 0 12px}
+.n30s .hero{position:relative;width:min(100%,360px);aspect-ratio:9/16;margin:8px auto 20px;border-radius:6px;overflow:hidden;background:#0d1b1f}
+.n30s .hero video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0d1b1f}
 .n30s .hero .t-click{display:none}
 @media(min-width:1024px) and (pointer:fine){.n30s .hero .t-tap{display:none}.n30s .hero .t-click{display:inline}}
-.n30s .hero .sound{position:absolute;top:12px;left:12px;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:7px 13px;background:rgba(0,0,0,.62);color:#fff;font:600 13px/1 Roboto,system-ui,sans-serif;cursor:pointer}
-.n30s .meta,.n30s .note,.n30s time{color:#aaa;font-size:14px}
-.n30s .note{border-left:3px solid #8ab4f8;padding:8px 12px;background:#1a1a1a;border-radius:4px}
-.n30s .kicker{text-transform:uppercase;letter-spacing:.06em;font-size:13px;font-weight:700;margin:0}
-.n30s .kicker a{text-decoration:none}
-.n30s img.thumb{width:100%;height:auto;border-radius:12px;margin:8px 0 16px;aspect-ratio:16/9;object-fit:cover;background:#1a1a1a}
+.n30s .hero .sound{position:absolute;top:12px;left:12px;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:3px;padding:7px 13px;background:rgba(13,27,31,.72);color:var(--txt);font:600 13px/1 "IBM Plex Sans",system-ui,sans-serif;cursor:pointer}
+.n30s .meta,.n30s .note,.n30s time{color:var(--txt2);font-size:14px}
+.n30s time{font-family:var(--mono);font-size:13px}
+.n30s .note{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:10px 0}
+.n30s .kicker{font-size:14px;font-weight:600;margin:0}
+.n30s .kicker a{text-decoration:none;color:var(--txt2)}
+.n30s img.thumb{width:100%;height:auto;border-radius:6px;margin:8px 0 16px;aspect-ratio:16/9;object-fit:cover;background:var(--raised)}
 .n30s ul.list{list-style:none;padding:0;margin:0}
-.n30s ul.list li{padding:10px 0;border-bottom:1px solid #262626}
-.n30s ul.list a{color:#f1f1f1;text-decoration:none;font-weight:500}
+.n30s ul.list li{padding:12px 0;border-bottom:1px solid var(--line)}
+.n30s ul.list a{font:500 18px/1.3 var(--serif);text-decoration:none}
 .n30s ul.list a:hover{text-decoration:underline}
-.n30s ul.list .meta{display:block}
-.n30s footer{margin-top:40px;color:#888;font-size:13px}
-.n30s .watch{background:#1a1a1a;border:1px solid #2c2c2c;border-radius:16px;padding:16px;margin:24px 0}
-.n30s .watch-title{margin:0 0 12px;font-size:19px;font-weight:700;line-height:1.3}
-.n30s .watch-title a{color:#fff;text-decoration:none}
+.n30s ul.list .meta{display:flex;gap:12px;margin-top:2px}
+.n30s footer{margin-top:40px;color:var(--txt2);font-size:13px;border-top:1px solid var(--line);padding-top:16px}
+.n30s footer a{color:var(--txt2);margin-right:16px}
+.n30s .watch{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:16px 0;margin:24px 0}
+.n30s .watch-title{margin:0 0 12px;font:600 20px/1.3 var(--serif)}
+.n30s .watch-title a{text-decoration:none}
 .n30s .watch-title a:hover{text-decoration:underline}
-.n30s .watch-title b{color:#ff3b30}
 .n30s .shelf{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.n30s .shelf a{display:block;color:#f1f1f1;text-decoration:none}
+.n30s .shelf a{display:block;text-decoration:none}
 .n30s .shelf a:hover .stitle{text-decoration:underline}
-.n30s .sthumb{position:relative;display:block;aspect-ratio:9/16;border-radius:12px;overflow:hidden;background:linear-gradient(160deg,#2a2a2a,#151515)}
+.n30s .sthumb{position:relative;display:block;aspect-ratio:9/16;border-radius:6px;overflow:hidden;background:var(--raised)}
 .n30s .sthumb img{width:100%;height:100%;object-fit:cover;display:block}
-.n30s .sthumb .play{position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center}
-.n30s .sthumb .play::after{content:"";margin-left:4px;border-style:solid;border-width:9px 0 9px 15px;border-color:transparent transparent transparent #fff}
-.n30s .sthumb .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.75);color:#fff;font-size:12px;font-weight:600;padding:1px 6px;border-radius:4px}
-.n30s .stitle{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;font-weight:500;line-height:1.35;margin-top:8px}
-.n30s .watch-cta{display:inline-block;margin-top:14px;background:#ff3b30;color:#fff;font-weight:700;text-decoration:none;padding:10px 18px;border-radius:999px}
-.n30s .watch-cta:hover{background:#ff5247}
+.n30s .sthumb .play{position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:rgba(13,27,31,.65);display:flex;align-items:center;justify-content:center}
+.n30s .sthumb .play::after{content:"";margin-left:4px;border-style:solid;border-width:9px 0 9px 15px;border-color:transparent transparent transparent var(--txt)}
+.n30s .sthumb .dur{position:absolute;right:6px;bottom:6px;background:rgba(13,27,31,.82);color:var(--txt);font:500 12px/1.5 var(--mono);padding:0 5px;border-radius:2px}
+.n30s .stitle{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font:500 15px/1.3 var(--serif);margin-top:8px}
+.n30s .watch-cta{display:inline-block;margin-top:14px;background:var(--txt);color:var(--bg);font-weight:600;text-decoration:none;padding:10px 18px;border-radius:3px}
+.n30s .watch-cta:hover{opacity:.9}
 @media (max-width:600px){
 .n30s .shelf{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:10px;padding-bottom:4px}
 .n30s .shelf li{flex:0 0 34%;scroll-snap-align:start}
-.n30s .stitle{font-size:13px}
+.n30s .stitle{font-size:14px}
+.n30s h1{font-size:25px}
 }
 </style>`;
 
@@ -319,7 +319,7 @@ const siteHeader = () =>
 const siteFooter = () =>
   "<footer><p>News30 stories are AI-condensed summaries of reporting by the credited news outlets. " +
   "Each story links to its original source.</p>" +
-  '<p><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p></footer>';
+  '<p><a href="/privacy">Privacy</a><a href="/terms">Terms</a></p></footer>';
 
 function storyList(rows) {
   if (!rows.length) return "<p>No stories yet — check back soon.</p>";
@@ -331,7 +331,7 @@ function storyList(rows) {
         return (
           '<li><a href="' + esc(pathFor(r)) + '">' + esc(r.headline || "Untitled story") + "</a>" +
           '<span class="meta">' + esc(sourceName(r.source)) +
-          (iso ? ' · <time datetime="' + iso + '">' + esc(humanDate(r.created_at)) + "</time>" : "") +
+          (iso ? ' <time datetime="' + iso + '">' + esc(humanDate(r.created_at)) + "</time>" : "") +
           "</span></li>"
         );
       })
@@ -421,7 +421,7 @@ async function categoryPage(req, res, cat) {
   const template = await getTemplate(req);
   let rows;
   try {
-    rows = (await latestStories()).filter((r) => normaliseCategory(r.category) === cat).slice(0, 60);
+    rows = (await latestStories()).filter((r) => storyCategory(r) === cat).slice(0, 60);
   } catch (e) {
     console.error("[seo] category stories:", String(e).slice(0, 200));
     return unavailable(req, res, template);
@@ -527,9 +527,9 @@ function watchShelf(rows, { lazy }) {
     .join("");
   return (
     '<aside class="watch" aria-label="Watch the latest News30 videos">' +
-    '<p class="watch-title"><a href="/">Watch today\'s news in 30 seconds <b>→</b></a></p>' +
+    '<p class="watch-title"><a href="/">Watch today\'s news in 30 seconds</a></p>' +
     '<ul class="shelf">' + cards + "</ul>" +
-    '<a class="watch-cta" href="/">Open the News30 feed →</a>' +
+    '<a class="watch-cta" href="/">Open the News30 feed</a>' +
     "</aside>"
   );
 }
@@ -576,8 +576,8 @@ async function storyPage(req, res) {
     const [found, latest] = await Promise.all([findStory(uuid), latestStories().catch(() => [])]);
     row = found;
     if (row) {
-      const cat = normaliseCategory(row.category);
-      related = latest.filter((r) => r.id !== row.id && normaliseCategory(r.category) === cat).slice(0, 8);
+      const cat = storyCategory(row);
+      related = latest.filter((r) => r.id !== row.id && storyCategory(r) === cat).slice(0, 8);
     }
   } catch (e) {
     console.error("[seo] story fetch:", String(e).slice(0, 200));
@@ -600,7 +600,7 @@ async function storyPage(req, res) {
   if (!safeHttpUrl(row.video_url)) {
     watchRows = (await latestPlayable().catch(() => [])).filter((r) => r.id !== row.id).slice(0, 4);
   }
-  const cat = normaliseCategory(row.category);
+  const cat = storyCategory(row);
   const catInfo = CATEGORIES[cat];
   const src = sourceName(row.source);
   const articleUrl = safeHttpUrl(row.article_url);
@@ -693,8 +693,8 @@ async function storyPage(req, res) {
     '<p class="kicker"><a href="/' + cat + '">' + esc(catInfo.label) + "</a></p>" +
     "<h1>" + esc(row.headline || "News story") + "</h1>" +
     '<p class="meta">' +
-    (published ? 'Published <time datetime="' + published + '">' + esc(humanDate(row.created_at)) + "</time> · " : "") +
-    "Source: " + sourceLink +
+    (published ? 'Published <time datetime="' + published + '">' + esc(humanDate(row.created_at)) + "</time>. " : "") +
+    "Reported by " + sourceLink +
     (originalPublished && humanDate(row.article_published) !== humanDate(row.created_at)
       ? ' (originally reported <time datetime="' + originalPublished + '">' + esc(humanDate(row.article_published)) + "</time>)"
       : "") +
@@ -706,7 +706,7 @@ async function storyPage(req, res) {
     (!videoUrl && image ? '<img class="thumb" src="' + esc(image) + '" alt="' + esc(row.headline || "") + '" width="1280" height="720" />' : "") +
     (script ? "<h2>Transcript</h2>\n" + scriptParagraphs(script) : "") +
     (articleUrl
-      ? '<p><a href="' + esc(articleUrl) + '" rel="noopener" target="_blank">Read the original article at ' + esc(src) + " →</a></p>"
+      ? '<p><a href="' + esc(articleUrl) + '" rel="noopener" target="_blank">Read the original article at ' + esc(src) + "</a></p>"
       : "") +
     "</article>" +
     watchShelf(watchRows, { lazy: true }) +

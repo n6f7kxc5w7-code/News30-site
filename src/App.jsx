@@ -19,6 +19,7 @@ import { createPortal, flushSync } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 import { Analytics } from '@vercel/analytics/react';
 import { storyPath, uuidFromSlug } from "./slug.js";
+import { storyCategory } from "./category.js";
 
 /* ════════════════════════ 1 · CONFIG ═══════════════════════════════ */
 
@@ -241,17 +242,18 @@ function fmtCount(n) {
 
 function timeAgo(ts) {
   const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
+  const ago = (n, unit) => n + " " + unit + (n === 1 ? "" : "s") + " ago";
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
-  if (m < 60) return m + "m ago";
+  if (m < 60) return ago(m, "minute");
   const h = Math.floor(m / 60);
-  if (h < 24) return h + "h ago";
+  if (h < 24) return ago(h, "hour");
   const d = Math.floor(h / 24);
-  if (d < 7) return d + (d === 1 ? " day ago" : " days ago");
-  if (d < 30) return Math.floor(d / 7) + "w ago";
+  if (d < 7) return ago(d, "day");
+  if (d < 30) return ago(Math.floor(d / 7), "week");
   const mo = Math.floor(d / 30);
-  if (mo < 12) return mo + "mo ago";
-  return Math.floor(mo / 12) + "y ago";
+  if (mo < 12) return ago(mo, "month");
+  return ago(Math.floor(mo / 12), "year");
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -307,7 +309,6 @@ const ICONS = {
   home: <><path d="M4 10.7 12 4l8 6.7" /><path d="M5.8 9.3V20h4.7v-5.3h3V20h4.7V9.3" /></>,
   flame: <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 0 0 2.5 2.5z" />,
   bookmark: <path d="M6.5 3.5h11V21L12 16.7 6.5 21z" />,
-  sparkle: <><path d="M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8z" /><path d="M18.7 15.6l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" /></>,
   fileText: <><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M9 13h6" /><path d="M9 17h6" /></>,
   globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3c3.2 4 3.2 14 0 18" /><path d="M12 3c-3.2 4-3.2 14 0 18" /></>,
   trendUp: <><path d="M3 17l6-6 4 4 8-9" /><path d="M15 6h6v6" /></>,
@@ -382,7 +383,7 @@ function Brand({ height = 26, onClick, className = "" }) {
       ) : (
         <div className="brandFallback" style={{ height }}>
           <span>NEWS&nbsp;3</span>
-          <Icon name="globe" size={Math.round(height * 0.82)} style={{ color: "#7d9cc9" }} />
+          <Icon name="globe" size={Math.round(height * 0.82)} style={{ color: "#9db0b0" }} />
         </div>
       )}
     </div>
@@ -441,7 +442,7 @@ const FACT = {
   disputed: { label: "Disputed", color: "#ff9500", icon: "alertTriangle" },
   // Real pipeline stories: we name and link the outlet, we don't claim
   // a fact-check that never happened.
-  sourced: { label: "Sourced", color: "#8ab4f8", icon: "check" },
+  sourced: { label: "Sourced", color: "#9db0b0", icon: "check" },
 };
 
 const CATEGORIES = [
@@ -449,12 +450,6 @@ const CATEGORIES = [
   { id: "geopolitics", label: "Geopolitics", icon: "globe" },
   { id: "finance", label: "Finance", icon: "trendUp" },
   { id: "sports", label: "Sports", icon: "football" },
-];
-const LOCKED_CATEGORIES = [
-  { id: "technology", label: "Technology", icon: "cpu" },
-  { id: "science", label: "Science", icon: "flask" },
-  { id: "local", label: "Local", icon: "mapPin" },
-  { id: "culture", label: "Culture", icon: "palette" },
 ];
 const catLabel = (id) => (CATEGORIES.find((c) => c.id === id) || { label: id }).label;
 
@@ -671,17 +666,12 @@ const fmtDurAny = (sec) => {
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 };
 
-/* Maps whatever category strings the ingest worker writes onto the
-   three categories the UI has chips for. Extend as you add more. */
-const CATEGORY_ALIASES = {
-  geopolitics: "geopolitics", world: "geopolitics", politics: "geopolitics", general: "geopolitics",
-  finance: "finance", business: "finance", markets: "finance", economy: "finance",
-  sports: "sports", sport: "sports",
-};
-const normaliseCategory = (c) => CATEGORY_ALIASES[String(c || "").toLowerCase()] || "geopolitics";
+/* Category comes from the story's content, not only the stored label
+   (see src/category.js) — this also corrects rows ingested before the
+   fix, e.g. shopping stories stored as geopolitics. */
 
 function mapPublishedStory(row) {
-  const category = normaliseCategory(row.category);
+  const category = storyCategory(row);
   const seed = hash(String(row.id));
   const rnd = seeded(seed);
   const durationSec = Math.max(1, Math.round(row.duration_seconds || 30));
@@ -1183,15 +1173,15 @@ const videoService = {
    This is what makes Row Level Security possible: Postgres trusts
    Supabase's own verified auth.uid(), not a client-decoded JWT.       */
 
-const AVATAR_COLORS = ["#3ea6ff", "#2ba640", "#ff9500", "#e91e63", "#9c6bff", "#00bcd4"];
+const AVATAR_COLORS = ["#4f8a8b", "#6f9a78", "#b9843a", "#b46a58", "#7d6f9a", "#5b7f86"];
 const colorForEmail = (email) => AVATAR_COLORS[hash(email) % AVATAR_COLORS.length];
 
 /* Fallback demo accounts — shown only when Supabase isn't configured
    yet (missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY), so sign-in
    stays testable before the backend is wired up.                     */
 const MOCK_GOOGLE_ACCOUNTS = [
-  { name: "Aidrus", email: "aidrus.founder@gmail.com", color: "#3ea6ff" },
-  { name: "News30 Test", email: "test@news30.app", color: "#2ba640" },
+  { name: "Aidrus", email: "aidrus.founder@gmail.com", color: "#4f8a8b" },
+  { name: "News30 Test", email: "test@news30.app", color: "#6f9a78" },
 ];
 
 /* 🔌 EMAIL SERVICE CONNECTION POINT (Mailchimp / Resend)
@@ -1224,12 +1214,12 @@ const emailService = {
 const CSS1 = `
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{
-  --bg:#0f0f0f;--raised:#272727;--hover:#3f3f3f;--bg2:#121212;
-  --line:rgba(255,255,255,.2);--line2:rgba(255,255,255,.1);
-  --txt:#f1f1f1;--txt2:#aaaaaa;--blue:#3ea6ff;--blue-d:#1c62b9;
-  --green:#2ba640;--orange:#ff9500;--red:#ff4e45;
-  --hd-h:56px;--sb-w:240px;--sb-mini:72px;--r:12px;
-  --font:"Roboto","Segoe UI",Arial,sans-serif;
+  --bg:#14262b;--raised:#1c3339;--hover:#25414a;--bg2:#102125;--stage:#0d1b1f;
+  --line:rgba(237,233,224,.2);--line2:rgba(237,233,224,.1);
+  --txt:#ede9e0;--txt2:#9db0b0;--clock:#f2a93b;--live:#e07a5f;
+  --green:#7fb08a;--red:#e07a5f;
+  --hd-h:56px;--sb-w:240px;--sb-mini:72px;--r:6px;--r-ctl:3px;
+  --font:"IBM Plex Sans","Segoe UI",Arial,sans-serif;--serif:"Newsreader",Georgia,serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
 }
 html,body,#root{height:100%}
 body{background:var(--bg);color:var(--txt);font-family:var(--font);font-size:14px;overflow-x:hidden}
@@ -1238,7 +1228,7 @@ button{font-family:var(--font);border:0;background:none;color:inherit;cursor:poi
 input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0;outline:none}
 @media(max-width:767px){input,textarea{font-size:16px!important}}
 ::-webkit-scrollbar{width:8px;height:8px}
-::-webkit-scrollbar-thumb{background:#3f3f3f;border-radius:4px}
+::-webkit-scrollbar-thumb{background:var(--hover);border-radius:4px}
 ::-webkit-scrollbar-track{background:transparent}
 .ibtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--txt);position:relative;flex:none;transition:background .15s}
 .ibtn:hover{background:var(--raised)}
@@ -1251,30 +1241,29 @@ input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0
 .hd-brand img{height:21px;display:block}
 .hd-brand svg{display:block}
 .hd-center{flex:1;display:flex;justify-content:center;min-width:0;padding:0 8px}
-.askbar{display:flex;align-items:center;width:100%;max-width:560px;height:40px;border:1px solid #303030;border-radius:20px;background:var(--bg2);overflow:hidden;transition:border-color .15s}
-.askbar:focus-within{border-color:var(--blue-d)}
+.askbar{display:flex;align-items:center;width:100%;max-width:560px;height:40px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--bg2);overflow:hidden;transition:border-color .15s}
+.askbar:focus-within{border-color:var(--txt2)}
 .askbar input{flex:1;height:100%;padding:0 6px 0 16px;font-size:15px;min-width:0}
-.askbar input::placeholder{color:#888}
-.ai-pill{flex:none;font-size:10.5px;font-weight:700;letter-spacing:.5px;color:var(--blue);border:1px solid rgba(62,166,255,.45);border-radius:999px;padding:2px 7px;margin-right:8px}
-.askbar-btn{flex:none;width:60px;height:100%;background:#222;display:flex;align-items:center;justify-content:center;border-left:1px solid #303030;color:var(--txt)}
-.askbar-btn:hover{background:#2f2f2f}
+.askbar input::placeholder{color:var(--txt2)}
+.askbar-btn{flex:none;width:60px;height:100%;background:var(--raised);display:flex;align-items:center;justify-content:center;border-left:1px solid var(--line);color:var(--txt)}
+.askbar-btn:hover{background:var(--hover)}
 .hd-right{display:flex;align-items:center;gap:2px;flex:none}
-.dot{position:absolute;top:5px;right:5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg)}
+.dot{position:absolute;top:5px;right:5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--live);color:var(--stage);font:600 10px/1 var(--mono);display:flex;align-items:center;justify-content:center;border:2px solid var(--bg)}
 .avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;color:#fff;flex:none}
 
 /* ── dropdown menus ── */
-.menu{position:fixed;top:calc(var(--hd-h) - 6px);right:16px;width:380px;max-width:calc(100vw - 24px);background:#212121;border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.55);z-index:70;overflow:hidden;animation:pop .16s ease}
-.menu-h{padding:13px 16px;font-size:16px;font-weight:500;border-bottom:1px solid var(--line2);display:flex;align-items:center;justify-content:space-between}
-.menu-h small{font-size:12px;color:var(--blue);font-weight:500;cursor:pointer}
+.menu{position:fixed;top:calc(var(--hd-h) - 6px);right:16px;width:380px;max-width:calc(100vw - 24px);background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);box-shadow:0 12px 32px rgba(0,0,0,.45);z-index:70;overflow:hidden;animation:pop .16s ease}
+.menu-h{padding:13px 16px;font:600 20px/1.2 var(--serif);border-bottom:1px solid var(--line2);display:flex;align-items:center;justify-content:space-between}
+.menu-h small{font:500 12px var(--font);color:var(--txt);text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 .menu-list{max-height:58vh;overflow-y:auto}
 .notif{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background .12s;align-items:flex-start;width:100%;text-align:left}
-.notif:hover{background:#2c2c2c}
-.notif-thumb{width:84px;height:47px;border-radius:8px;overflow:hidden;flex:none}
+.notif:hover{background:var(--hover)}
+.notif-thumb{width:84px;height:47px;border-radius:var(--r);overflow:hidden;flex:none}
 .thumb svg{width:100%;height:100%;display:block}
 .thumb img{width:100%;height:100%;display:block;object-fit:cover}
-.notif-t{font-size:13.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.notif-m{font-size:12px;color:var(--txt2);margin-top:4px}
-.notif-dot{width:5px;height:5px;border-radius:50%;background:var(--blue);flex:none;margin-top:9px}
+.notif-t{font:500 14px/1.35 var(--serif);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.notif-m{font-size:12px;color:var(--txt2);margin-top:4px;display:flex;gap:10px}
+.notif-dot{width:6px;height:6px;border-radius:50%;background:var(--live);flex:none;margin-top:9px}
 .menu-empty{padding:38px 16px;text-align:center;color:var(--txt2);font-size:13.5px;display:flex;flex-direction:column;align-items:center;gap:12px}
 
 /* profile card */
@@ -1282,27 +1271,27 @@ input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0
 .pf-name{font-size:16px;font-weight:500}
 .pf-mail{font-size:13px;color:var(--txt2);margin-top:2px}
 .pf-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px;position:relative}
-.stat{background:var(--raised);border-radius:10px;padding:12px 12px 10px;display:flex;flex-direction:column;gap:3px}
-.stat b{font-size:19px;font-weight:700;display:flex;align-items:center;gap:6px}
-.stat span{font-size:11px;color:var(--txt2);letter-spacing:.3px;text-transform:uppercase;font-weight:600}
-.pf-lock{position:absolute;inset:6px;border-radius:12px;background:rgba(15,15,15,.74);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;text-align:center;padding:14px;z-index:1}
-.pf-lock p{font-size:13px;color:#ddd;line-height:1.45;max-width:250px}
-.gbtn{display:inline-flex;align-items:center;gap:10px;background:#fff;color:#1f1f1f;font-weight:500;font-size:14px;border-radius:999px;padding:9px 16px;transition:box-shadow .15s,transform .15s}
+.stat{background:var(--bg2);border-radius:var(--r-ctl);padding:12px 12px 10px;display:flex;flex-direction:column;gap:3px}
+.stat b{font:500 20px var(--mono);display:flex;align-items:center;gap:6px}
+.stat span{font-size:12px;color:var(--txt2)}
+.pf-lock{position:absolute;inset:6px;border-radius:var(--r);background:rgba(20,38,43,.82);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;text-align:center;padding:14px;z-index:1}
+.pf-lock p{font-size:14px;color:var(--txt);line-height:1.45;max-width:250px}
+.gbtn{display:inline-flex;align-items:center;gap:10px;background:var(--txt);color:var(--bg);font-weight:600;font-size:14px;border-radius:var(--r-ctl);padding:9px 16px;transition:box-shadow .15s,transform .15s}
 .gbtn:hover{box-shadow:0 3px 10px rgba(0,0,0,.5)}
 .gbtn:active{transform:scale(.98)}
 .pf-row{display:flex;align-items:center;gap:14px;padding:11px 16px;font-size:14px;cursor:pointer;width:100%;text-align:left}
-.pf-row:hover{background:#2c2c2c}
+.pf-row:hover{background:var(--hover)}
 
 /* ── sidebar / drawer / bottom nav ── */
 .sb{position:fixed;top:var(--hd-h);left:0;bottom:0;width:var(--sb-w);padding:12px;overflow-y:auto;background:var(--bg);z-index:50}
-.sb-item{display:flex;align-items:center;gap:24px;height:40px;padding:0 12px;border-radius:10px;font-size:14px;cursor:pointer;transition:background .12s;white-space:nowrap;width:100%;text-align:left}
+.sb-item{display:flex;align-items:center;gap:24px;height:40px;padding:0 12px;border-radius:var(--r-ctl);font-size:14px;cursor:pointer;transition:background .12s;white-space:nowrap;width:100%;text-align:left}
 .sb-item:hover{background:var(--raised)}
-.sb-item.on{background:var(--raised);font-weight:500}
+.sb-item.on{background:var(--raised);font-weight:600;box-shadow:inset 3px 0 0 var(--txt)}
 .sb-sep{height:1px;background:var(--line2);margin:12px 4px}
-.sb-note{padding:10px 12px;font-size:12px;color:var(--txt2);line-height:1.55}
+.sb-note{padding:10px 12px;font-size:12px;color:var(--txt2);line-height:1.6}
 .sb-note a{color:inherit}
 .sb.mini{width:var(--sb-mini);padding:4px 4px 12px}
-.sb.mini .sb-item{flex-direction:column;gap:6px;height:74px;justify-content:center;font-size:10px;padding:0;border-radius:12px;gap:6px}
+.sb.mini .sb-item{flex-direction:column;gap:6px;height:74px;justify-content:center;font-size:10px;padding:0;border-radius:var(--r);box-shadow:none}
 .sb.mini .sb-sep,.sb.mini .sb-note{display:none}
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:80;animation:fade .2s;border:0}
 .drawer{position:fixed;top:0;left:0;bottom:0;width:250px;background:var(--bg);z-index:81;padding:0 12px 12px;overflow-y:auto;animation:slide-r .2s ease}
@@ -1313,50 +1302,44 @@ input,textarea{font-family:var(--font);color:var(--txt);background:none;border:0
 
 /* ── chips ── */
 .chips-wrap{position:sticky;top:var(--hd-h);z-index:40;background:var(--bg)}
-.chips{display:flex;gap:12px;padding:12px 0;overflow-x:auto;scrollbar-width:none}
+.chips{display:flex;gap:4px;padding:10px 0 0;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--line2)}
 .chips::-webkit-scrollbar{display:none}
-.chip{flex:none;display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 12px;border-radius:8px;background:var(--raised);font-size:14px;font-weight:500;transition:background .12s,color .12s;white-space:nowrap}
-.chip:hover{background:var(--hover)}
-.chip.on{background:var(--txt);color:var(--bg)}
-.chip.on:hover{background:var(--txt)}
-.chip.locked{color:#7a7a7a;cursor:default;background:rgba(39,39,39,.55)}
-.chip.locked:hover{background:rgba(39,39,39,.55)}
-.pro{font-size:9px;font-weight:800;letter-spacing:.6px;color:#161616;background:var(--orange);border-radius:4px;padding:2px 5px}
+.chip{flex:none;display:inline-flex;align-items:center;height:38px;padding:0 14px;border-radius:0;background:none;color:var(--txt2);font-size:15px;font-weight:500;border-bottom:2px solid transparent;transition:color .12s,border-color .12s;white-space:nowrap}
+.chip:hover{color:var(--txt)}
+.chip.on{color:var(--txt);border-bottom-color:var(--txt)}
+.chip.on:hover{color:var(--txt)}
 
 /* ── layout / grid / cards ── */
 .main{padding-top:var(--hd-h);transition:padding-left .2s ease;min-height:100vh}
 .main.sb-full{padding-left:var(--sb-w)}
 .main.sb-mini-pad{padding-left:var(--sb-mini)}
 .page{padding:0 24px 60px;max-width:2000px;margin:0 auto}
-.ph{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:600;padding:22px 0 6px}
+.ph{display:flex;align-items:center;gap:12px;font:600 25px/1.2 var(--serif);padding:22px 0 6px}
 .ph .ibtn{background:var(--raised)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));column-gap:16px;row-gap:40px;padding-top:20px}
 .card{cursor:pointer;display:flex;flex-direction:column;gap:12px;min-width:0;text-align:left}
-.thumb{position:relative;border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;background:#181818;transition:border-radius .18s}
-.card:hover .thumb{border-radius:7px}
+.thumb{position:relative;border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;background:var(--bg2)}
 .thumb svg{width:100%;height:100%;display:block}
-.badge-dur{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.8);color:#fff;font-size:12px;font-weight:500;padding:1px 5px;border-radius:4px}
-.badge-date{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.62);backdrop-filter:blur(3px);color:#eee;font-size:11px;font-weight:500;padding:2.5px 8px;border-radius:6px;letter-spacing:.2px}
+.badge-dur{position:absolute;right:8px;bottom:8px;background:rgba(13,27,31,.82);color:var(--txt);font:500 12px/1.5 var(--mono);padding:0 5px;border-radius:2px}
 .card-row{display:flex;gap:12px;align-items:flex-start}
-.src-av{width:36px;height:36px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:#fff}
+.src-av{width:36px;height:36px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-weight:600;color:var(--txt);background:var(--raised);border:1px solid var(--line2)}
 .card-body{flex:1;min-width:0}
-.card-title{font-size:16px;line-height:22px;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card-meta{margin-top:5px;font-size:13px;color:var(--txt2);display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px}
-.mdot::before{content:"•";margin:0 1px;color:var(--txt2)}
-.tag{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid}
+.card-title{font:500 17px/1.3 var(--serif);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card-meta{margin-top:6px;font-size:14px;color:var(--txt2);display:flex;flex-direction:column;gap:1px}
+.card-meta .when{font:400 12px/1.6 var(--mono)}
 .card .more{opacity:0;width:36px;height:36px;margin-left:auto}
 .card:hover .more{opacity:1}
 @media(hover:none){.card .more{opacity:1}}
-.cmenu{position:fixed;z-index:75;background:#212121;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:8px 0;width:210px;animation:pop .14s ease}
+.cmenu{position:fixed;z-index:75;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.45);padding:8px 0;width:210px;animation:pop .14s ease}
 .cmenu button{display:flex;align-items:center;gap:14px;width:100%;padding:9px 16px;font-size:14px;text-align:left}
-.cmenu button:hover{background:#2c2c2c}
-.sk-line{height:14px;border-radius:7px;background:#1e1e1e;margin-top:10px}
-.shimmer{position:relative;overflow:hidden;background:#1e1e1e}
+.cmenu button:hover{background:var(--hover)}
+.sk-line{height:14px;border-radius:2px;background:var(--raised);margin-top:10px}
+.shimmer{position:relative;overflow:hidden;background:var(--raised)}
 .shimmer::after{content:"";position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent);animation:shimmer 1.4s infinite}
 .feed-end{padding:44px 0;text-align:center;color:var(--txt2);font-size:13px}
-.spin{width:26px;height:26px;border:3px solid #3f3f3f;border-top-color:var(--txt);border-radius:50%;animation:rot .8s linear infinite;margin:30px auto}
+.spin{width:26px;height:26px;border:3px solid var(--hover);border-top-color:var(--txt);border-radius:50%;animation:rot .8s linear infinite;margin:30px auto}
 .empty{padding:70px 20px;text-align:center;color:var(--txt2);display:flex;flex-direction:column;align-items:center;gap:14px;font-size:14px}
-.empty b{color:var(--txt);font-size:17px;font-weight:600}
+.empty b{color:var(--txt);font:600 20px var(--serif)}
 `;
 
 /* ═══════════════════════ 6 · STYLES (part 2) ═══════════════════════ */
@@ -1365,23 +1348,24 @@ const CSS2 = `
 .player{position:fixed;left:0;right:0;top:var(--hd-h);bottom:0;background:var(--bg);z-index:55;display:flex;align-items:center;justify-content:center;animation:fade .18s}
 .pl-stage{position:relative;height:calc(100% - 40px);max-height:840px;display:flex;align-items:stretch;gap:0;transition:transform .24s ease}
 .player.panel-open .pl-stage{transform:translateX(-208px)}
-.pl-video{position:relative;height:100%;aspect-ratio:9/16;border-radius:14px;overflow:hidden;background:#000;box-shadow:0 10px 44px rgba(0,0,0,.6)}
+.pl-video{position:relative;height:100%;aspect-ratio:9/16;border-radius:var(--r);overflow:hidden;background:var(--stage);box-shadow:0 10px 44px rgba(0,0,0,.45)}
 .pl-video>svg{position:absolute;inset:0;width:100%;height:100%}
-.pl-vid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+.pl-vid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:var(--stage)}
 .pl-kb{animation:kenburns 24s ease-in-out infinite alternate;transform-origin:62% 38%}
 .pl-kb.paused{animation-play-state:paused}
 .pl-grad{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.4),transparent 26%,transparent 52%,rgba(0,0,0,.76));pointer-events:none}
 .pl-tap{position:absolute;inset:0;border:0;cursor:pointer}
 .pl-topline{position:absolute;top:0;left:0;right:0;padding:14px;display:flex;justify-content:flex-end;pointer-events:none}
-.pl-cat{display:inline-flex;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);border-radius:999px;padding:6px 13px;font-size:12.5px;font-weight:600;letter-spacing:.3px}
+.pl-cat{font-size:14px;font-weight:600;text-shadow:0 1px 8px rgba(0,0,0,.7)}
 .pl-info{position:absolute;left:16px;right:74px;bottom:20px;pointer-events:none;transition:opacity .4s ease}
 .pl-topline{transition:opacity .4s ease}
 .pl-fade{opacity:0}
-.pl-kick{display:inline-block;background:var(--blue);color:#04182b;font-weight:800;font-size:11.5px;letter-spacing:.9px;padding:3px 9px;border-radius:5px;margin-bottom:9px}
-.pl-headline{font-size:19px;line-height:1.32;font-weight:600;text-shadow:0 1px 10px rgba(0,0,0,.65)}
-.pl-sub{margin-top:9px;font-size:12.5px;color:#e2e2e2;display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;text-shadow:0 1px 6px rgba(0,0,0,.6)}
-.pl-prog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.22);z-index:2}
-.pl-prog i{display:block;height:100%;background:#fff;transition:width .12s linear}
+.pl-headline{font:600 20px/1.3 var(--serif);text-shadow:0 1px 10px rgba(0,0,0,.65)}
+.pl-sub{margin-top:9px;font-size:14px;color:var(--txt);display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+.pl-sub .when{font:400 12px var(--mono)}
+.pl-prog{position:absolute;left:6px;right:6px;bottom:6px;height:4px;display:flex;gap:2px;z-index:2;pointer-events:none}
+.pl-prog i{flex:1;height:100%;border-radius:1px;background:rgba(237,233,224,.28);transition:background .15s}
+.pl-prog i.on{background:var(--clock)}
 
 .pl-close{position:absolute;left:18px;top:14px;z-index:3}
 .pl-close .ibtn,.pl-nav .ibtn{background:var(--raised)}
@@ -1390,14 +1374,14 @@ const CSS2 = `
 .rail-btn .ibtn{width:48px;height:48px}
 .rail-btn .ibtn{background:var(--raised)}
 .rail-btn .ibtn:hover{background:var(--hover)}
-.rail-btn .liked{color:var(--red)}
-.rail-btn .saved-on{color:var(--blue)}
+.rail-btn .liked{color:var(--live)}
+.rail-btn .saved-on{color:var(--txt)}
 .pl-nav{position:absolute;right:26px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:14px;z-index:3}
 .pl-nav .ibtn{width:52px;height:52px}
 .pl-nav .ibtn:disabled{opacity:.32;cursor:default}
 .pl-nav .ibtn:disabled:hover{background:var(--raised)}
-.pl-sound{position:absolute;top:14px;left:0;right:0;margin:0 auto;width:max-content;z-index:4;touch-action:manipulation;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:999px;padding:8px 14px 8px 11px;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);color:#fff;font:600 13px/1 var(--font);cursor:pointer;animation:snd-in .3s ease,snd-pulse 2.4s ease-in-out .6s 3}
-.pl-sound:hover{background:rgba(0,0,0,.78)}
+.pl-sound{position:absolute;top:14px;left:0;right:0;margin:0 auto;width:max-content;z-index:4;touch-action:manipulation;display:inline-flex;align-items:center;gap:7px;border:0;border-radius:var(--r-ctl);padding:8px 14px 8px 11px;background:rgba(13,27,31,.72);backdrop-filter:blur(4px);color:var(--txt);font:600 13px/1 var(--font);cursor:pointer;animation:snd-in .3s ease,snd-pulse 2.4s ease-in-out .6s 3}
+.pl-sound:hover{background:rgba(13,27,31,.88)}
 @keyframes snd-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 @keyframes snd-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 0 7px rgba(255,255,255,0)}}
 /* ── desktop watch layout (.pl-wide: player ≥1024px wide, set from JS so
@@ -1408,57 +1392,55 @@ const CSS2 = `
 .pl-wide .pl-info,.pl-wide .pl-topline,.pl-wide .pl-nav{display:none}
 .pl-wide .pl-rail{padding-left:14px}
 .pl-wide .rail-sum,.pl-wide .rail-quiz{display:none}
-.pl-wide .pl-close .ibtn{width:auto;padding:0 16px 0 12px;border-radius:999px;gap:8px;font-size:14px;font-weight:500}
+.pl-wide .pl-close .ibtn{width:auto;padding:0 16px 0 12px;border-radius:var(--r-ctl);gap:8px;font-size:14px;font-weight:500}
 .pl-close-t{display:none}
 .pl-wide .pl-close-t{display:inline}
 .pl-side{position:relative;flex:none;width:clamp(340px,27vw,460px);height:calc(100% - 40px);max-height:920px}
-.ws-scroll{height:100%;overflow-y:auto;display:flex;flex-direction:column;gap:18px;padding-right:6px;scrollbar-width:thin}
+.ws-scroll{height:100%;overflow-y:auto;display:flex;flex-direction:column;gap:0;padding-right:6px;scrollbar-width:thin}
+.ws-scroll>*{padding:18px 0;border-top:1px solid var(--line2)}
+.ws-scroll>:first-child{padding-top:2px;border-top:0}
+.ws-scroll>.ws-keys{border-top:0}
 .pl-side .pnl{top:0;right:0;bottom:0;left:0;width:auto;max-width:none}
-.ws-kick{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2);font-weight:500}
-.ws-kick .chip-cat{display:inline-flex;align-items:center;gap:6px;color:var(--txt);background:var(--raised);border-radius:999px;padding:4px 11px 4px 9px;font-weight:600}
-.ws-title{font-size:23px;line-height:1.28;font-weight:700;margin:10px 0 0;letter-spacing:-.2px}
-.ws-src{margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13.5px;color:var(--txt2)}
+.ws-kick{font-size:14px;font-weight:600;color:var(--txt2)}
+.ws-title{font:600 31px/1.18 var(--serif);margin:8px 0 0;letter-spacing:-.2px}
+.ws-src{margin-top:12px;font-size:15px;color:var(--txt)}
+.ws-note{margin-top:6px;font-size:14px;line-height:1.55;color:var(--txt2)}
+.ws-note a,.ws-link,.sum-src a{color:var(--txt);text-decoration:underline;text-decoration-color:var(--txt2);text-underline-offset:3px}
+.ws-note a:hover,.ws-link:hover,.sum-src a:hover{text-decoration-color:var(--txt)}
+.ws-clock{margin-top:14px;font:500 14px var(--mono);color:var(--clock)}
+.ws-clock span{color:var(--txt2)}
+.ws-links{display:flex;gap:24px;flex-wrap:wrap}
+.ws-link{font-size:15px;font-weight:500;padding:2px 0}
+.ws-link.on{text-decoration-color:var(--clock)}
 .ws-src b{color:var(--txt);font-weight:600}
-.ws-orig{margin-top:12px;display:inline-flex;align-items:center;gap:7px;color:var(--blue);font-size:14px;font-weight:500;text-decoration:none}
-.ws-orig:hover{text-decoration:underline}
-.ws-card{background:#1b1b1b;border:1px solid var(--line2);border-radius:14px;padding:14px 16px}
-.ws-row{display:flex;gap:10px}
-.ws-btn{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;border-radius:999px;background:var(--raised);color:var(--txt);font-size:14px;font-weight:600}
-.ws-btn:hover{background:var(--hover)}
-.ws-btn.on{background:#f1f1f1;color:#0f0f0f}
-.ws-btn:disabled{opacity:.55;cursor:default}
-.ws-quiz{display:flex;align-items:center;gap:12px}
-.ws-quiz .ic-wrap{width:40px;height:40px;border-radius:12px;background:rgba(62,166,255,.14);color:var(--blue);display:flex;align-items:center;justify-content:center;flex:none}
-.ws-quiz-t{font-size:14.5px;font-weight:600}
-.ws-quiz-s{font-size:12.5px;color:var(--txt2);margin-top:2px}
-.ws-bar{height:4px;border-radius:2px;background:rgba(255,255,255,.12);margin-top:8px;overflow:hidden}
-.ws-bar i{display:block;height:100%;background:var(--blue);transition:width .2s linear}
+.ws-quiz-t{font:600 20px/1.25 var(--serif)}
+.ws-quiz-s{font-size:14px;color:var(--txt2);margin-top:4px;line-height:1.5}
+.ws-quiz-s b{font:500 14px var(--mono);color:var(--clock)}
 .ws-h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px}
-.ws-h h2{font-size:16px;font-weight:700}
-.ws-h span{font-size:12.5px;color:var(--txt2)}
-.ws-up{display:flex;gap:14px;width:100%;text-align:left;padding:10px;margin:0 -10px;width:calc(100% + 20px);border-radius:12px;transition:background .15s}
+.ws-h h2{font:600 20px var(--serif)}
+.ws-h span{font:400 12px var(--mono);color:var(--txt2)}
+.ws-up{display:flex;gap:14px;text-align:left;padding:10px;margin:0 -10px;width:calc(100% + 20px);border-radius:var(--r);transition:background .15s}
 .ws-up:hover{background:var(--raised)}
-.ws-up .tn{position:relative;flex:none;width:92px;aspect-ratio:9/16;border-radius:10px;overflow:hidden;background:#181818}
+.ws-up .tn{position:relative;flex:none;width:92px;aspect-ratio:9/16;border-radius:var(--r);overflow:hidden;background:var(--bg2)}
 .ws-up .tn img,.ws-up .tn svg{width:100%;height:100%;object-fit:cover;display:block}
-.ws-up .tn .dur{position:absolute;right:5px;bottom:5px;background:rgba(0,0,0,.75);font-size:11px;font-weight:600;border-radius:4px;padding:1px 5px}
-.ws-up-l{font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--blue)}
-.ws-up-t{margin-top:4px;font-size:15.5px;line-height:1.32;font-weight:600;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.ws-up-m{margin-top:6px;font-size:12.5px;color:var(--txt2)}
-.ws-play{margin-top:10px;display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px 0 10px;border-radius:999px;background:#f1f1f1;color:#0f0f0f;font-size:13.5px;font-weight:700}
+.ws-up .tn .dur,.ws-item .tn .dur{position:absolute;right:5px;bottom:5px;background:rgba(13,27,31,.82);font:500 11px/1.5 var(--mono);border-radius:2px;padding:0 4px}
+.ws-up-t{font:600 20px/1.25 var(--serif);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.ws-up-m{margin-top:8px;font-size:14px;color:var(--txt2);display:flex;gap:12px}
 .ws-list{list-style:none;display:flex;flex-direction:column;gap:2px;margin-top:6px}
-.ws-item{display:flex;gap:12px;width:calc(100% + 16px);margin:0 -8px;padding:8px;border-radius:10px;text-align:left}
+.ws-item{display:flex;gap:12px;width:calc(100% + 16px);margin:0 -8px;padding:8px;border-radius:var(--r);text-align:left}
 .ws-item:hover{background:var(--raised)}
-.ws-item .tn{flex:none;width:54px;aspect-ratio:9/16;border-radius:7px;overflow:hidden;background:#181818}
+.ws-item .tn{position:relative;flex:none;width:54px;aspect-ratio:9/16;border-radius:var(--r-ctl);overflow:hidden;background:var(--bg2)}
 .ws-item .tn img,.ws-item .tn svg{width:100%;height:100%;object-fit:cover;display:block}
-.ws-item-t{font-size:14px;line-height:1.34;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ws-item-m{margin-top:4px;font-size:12px;color:var(--txt2)}
-.ws-tx summary{cursor:pointer;font-size:14.5px;font-weight:600;list-style:none;display:flex;align-items:center;justify-content:space-between}
+.ws-item-t{font:500 16px/1.3 var(--serif);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ws-item-m{margin-top:4px;font-size:12px;color:var(--txt2);display:flex;gap:10px}
+.ws-item-m .when,.ws-up-m .when{font-family:var(--mono)}
+.ws-tx summary{cursor:pointer;font:600 20px var(--serif);list-style:none;display:flex;align-items:baseline;justify-content:space-between}
 .ws-tx summary::-webkit-details-marker{display:none}
-.ws-tx summary::after{content:"Show";font-size:12.5px;font-weight:500;color:var(--txt2)}
+.ws-tx summary::after{content:"Show";font:500 14px var(--font);color:var(--txt2);text-decoration:underline;text-underline-offset:3px}
 .ws-tx[open] summary::after{content:"Hide"}
-.ws-tx p{margin-top:10px;font-size:14px;line-height:1.62;color:#dcdcdc}
-.ws-keys{font-size:12px;color:var(--txt2);padding:2px 2px 8px}
-.ws-keys kbd{font:600 11px/1 var(--font);background:var(--raised);border:1px solid var(--line2);border-radius:5px;padding:3px 6px;color:var(--txt)}
+.ws-tx p{margin-top:10px;font-size:15px;line-height:1.65;color:var(--txt)}
+.ws-keys{font-size:12px;color:var(--txt2);padding:2px 2px 8px;display:flex;flex-wrap:wrap;gap:6px 16px}
+.ws-keys kbd{font:500 11px/1 var(--mono);background:var(--raised);border:1px solid var(--line2);border-radius:2px;padding:3px 6px;margin-right:5px;color:var(--txt)}
 @media(min-width:1024px){
   /* Feed on desktop: vertical cards that show the real 9:16 frame
      (caption included) instead of a 16:9 crop of its middle third. */
@@ -1468,14 +1450,14 @@ const CSS2 = `
   .card .more{width:28px;margin-right:-8px}
   .thumb{aspect-ratio:3/4}
   .thumb img{object-position:50% 70%}
-  .card-title{font-size:15px;line-height:21px;-webkit-line-clamp:3}
+  .card-title{font-size:16px;line-height:1.3;-webkit-line-clamp:3}
   .thumb .hov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 70%;animation:fade .25s}
 }
-.pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
+.pl-pp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:66px;height:66px;border-radius:50%;background:rgba(13,27,31,.6);display:flex;align-items:center;justify-content:center;animation:pp-flash .55s ease forwards;pointer-events:none}
 /* ── slide panel (summary / quiz — one shared shell) ── */
-.pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:#212121;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.45);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
+.pnl{position:absolute;top:20px;right:20px;bottom:20px;width:400px;max-width:calc(100vw - 32px);background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden;box-shadow:-6px 0 28px rgba(0,0,0,.35);animation:slide-l .22s cubic-bezier(.2,.7,.3,1);z-index:4}
 .pnl-h{display:flex;align-items:center;gap:6px;padding:11px 10px 11px 18px;border-bottom:1px solid var(--line2);flex:none}
-.pnl-h h3{font-size:16px;font-weight:600;flex:1;display:flex;align-items:center;gap:9px}
+.pnl-h h3{font:600 20px var(--serif);flex:1;display:flex;align-items:center;gap:9px}
 .pnl-h .ibtn{width:38px;height:38px}
 .pnl-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
 /* Full-screen Ask AI chat (mobile). A fixed box sized to the visual
@@ -1487,7 +1469,7 @@ const CSS2 = `
    opaque .achat behind it covers everything else, keyboard area included. */
 .achat-col{position:absolute;left:0;right:0;top:0;height:100%;display:flex;flex-direction:column;background:var(--bg);will-change:transform}
 .achat-h{flex:none;display:flex;align-items:center;gap:10px;padding:8px 6px 8px 16px;border-bottom:1px solid var(--line2)}
-.achat-h h3{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.achat-h h3{flex:1;min-width:0;font:600 16px/1.3 var(--serif);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .achat-h .ibtn{flex:none;width:44px;height:44px}
 .achat-body{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:16px}
 .achat-empty{color:var(--txt2);font-size:14px;text-align:center;padding:24px 8px}
@@ -1495,119 +1477,117 @@ const CSS2 = `
 .achat-chips{flex:none}
 .achat-chips{display:flex;gap:8px;overflow-x:auto;margin:0 -12px 8px;padding:2px 12px;scrollbar-width:none}
 .achat-chips::-webkit-scrollbar{display:none}
-.achat-chips button{flex:none;border:0;border-radius:999px;background:var(--raised);color:inherit;font:inherit;font-size:14px;padding:8px 14px;white-space:nowrap;cursor:pointer}
+.achat-chips button{flex:none;border:1px solid var(--line);border-radius:var(--r-ctl);background:none;color:inherit;font:inherit;font-size:14px;padding:7px 12px;white-space:nowrap;cursor:pointer}
 .achat .ask-in input{font-size:16px}
-.ask-fake{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg2);border:1px solid #303030;border-radius:999px;padding:4px 4px 4px 15px;color:var(--txt2);font:inherit;font-size:16px;text-align:left;cursor:text}
-.pnl-foot{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:#212121}
-.tune{position:absolute;top:50px;right:54px;background:#2c2c2c;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;z-index:5;animation:pop .14s;width:190px}
+.ask-fake{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-ctl);padding:4px 4px 4px 15px;color:var(--txt2);font:inherit;font-size:16px;text-align:left;cursor:text}
+.pnl-foot{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:var(--raised)}
+.tune{position:absolute;top:50px;right:54px;background:var(--bg2);border:1px solid var(--line2);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.4);padding:6px 0;z-index:5;animation:pop .14s;width:190px}
 .tune button{display:flex;width:100%;padding:9px 15px;font-size:13.5px;gap:10px;align-items:center;text-align:left}
-.tune button:hover{background:#383838}
-.tune button.on{color:var(--blue);font-weight:600}
+.tune button:hover{background:var(--hover)}
+.tune button.on{font-weight:600}
 
 /* summary content */
-.sum-p{font-size:14px;line-height:1.62;color:#e8e8e8}
-.sum-sec{font-size:11px;font-weight:800;letter-spacing:1.2px;color:var(--txt2);margin-top:6px}
-.sum-li{display:flex;gap:10px;font-size:13.5px;line-height:1.5;color:#ddd}
-.sum-li i{color:var(--blue);flex:none;margin-top:2px;display:flex}
-.sum-src{display:flex;align-items:center;gap:11px;background:var(--raised);border-radius:10px;padding:9px 12px;font-size:13px}
-.sum-src small{color:var(--txt2);font-size:12px;display:block;margin-top:1px}
-.mode-pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--blue);background:rgba(62,166,255,.1);border:1px solid rgba(62,166,255,.35);border-radius:999px;padding:3px 9px;align-self:flex-start}
+.sum-p{font-size:15px;line-height:1.65;color:var(--txt)}
+.sum-mode{font:italic 500 16px var(--serif);color:var(--txt2)}
+.sum-sec{font:600 20px var(--serif);color:var(--txt);margin-top:8px}
+.sum-ol{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:8px;font-size:14px;line-height:1.5;color:var(--txt)}
+.sum-ol li::marker{font:500 13px var(--mono);color:var(--txt2)}
+.sum-src{font-size:14px;line-height:1.55;color:var(--txt2)}
 .regen{display:flex;align-items:center;gap:10px;color:var(--txt2);font-size:13px;padding:26px 0;justify-content:center}
 .regen .spin{margin:0;width:18px;height:18px;border-width:2.5px}
 
 /* chat */
 .chat{display:flex;flex-direction:column;gap:10px}
-.chat-hint{font-size:12px;color:var(--txt2);text-align:center;padding:2px 0 0}
-.msg{max-width:86%;padding:9px 13px;border-radius:14px;font-size:13.5px;line-height:1.52;white-space:pre-wrap;word-break:break-word;animation:pop .18s}
-.msg.user{align-self:flex-end;background:var(--blue);color:#04182b;border-bottom-right-radius:4px;font-weight:500}
-.msg.ai{align-self:flex-start;background:var(--raised);border-bottom-left-radius:4px}
-.typing{display:inline-flex;gap:4px;padding:13px 15px;background:var(--raised);border-radius:14px;border-bottom-left-radius:4px;align-self:flex-start}
-.typing i{width:6px;height:6px;border-radius:50%;background:#9a9a9a;animation:blink 1.2s infinite}
+.chat-hint{font-size:12px;color:var(--txt2);text-align:center;padding:4px 0 0}
+.msg{max-width:86%;padding:9px 13px;border-radius:var(--r);font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word;animation:pop .18s}
+.msg.user{align-self:flex-end;background:var(--txt);color:var(--bg);border-bottom-right-radius:2px;font-weight:500}
+.msg.ai{align-self:flex-start;background:var(--bg2);border:1px solid var(--line2);border-bottom-left-radius:2px}
+.typing{display:inline-flex;gap:4px;padding:13px 15px;background:var(--bg2);border-radius:var(--r);border-bottom-left-radius:2px;align-self:flex-start}
+.typing i{width:6px;height:6px;border-radius:50%;background:var(--txt2);animation:blink 1.2s infinite}
 .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
-.ask-in{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid #303030;border-radius:999px;padding:4px 4px 4px 15px}
-.ask-in:focus-within{border-color:var(--blue-d)}
+.ask-in{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-ctl);padding:4px 4px 4px 15px}
+.ask-in:focus-within{border-color:var(--txt2)}
 .ask-in input{flex:1;font-size:13.16px;height:34px;min-width:0}
-.send{width:36px;height:36px;border-radius:50%;background:var(--blue);color:#04182b;display:flex;align-items:center;justify-content:center;flex:none;transition:opacity .15s,transform .1s}
+.send{width:36px;height:36px;border-radius:2px;background:var(--txt);color:var(--bg);display:flex;align-items:center;justify-content:center;flex:none;transition:opacity .15s,transform .1s}
 .send:active{transform:scale(.94)}
 .send:disabled{opacity:.35;cursor:default}
 
 /* quiz content */
-.qz-top{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--txt2);font-weight:500}
-.qz-pts{display:flex;align-items:center;gap:6px;color:var(--blue);font-weight:700}
-.qz-bar{height:4px;border-radius:2px;background:#3a3a3a;overflow:hidden}
-.qz-bar i{display:block;height:100%;background:var(--blue);transition:width .3s ease}
-.qz-q{font-size:15.5px;font-weight:600;line-height:1.45;animation:pop .2s}
-.qz-opt{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:var(--raised);border:1.5px solid transparent;border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.4;transition:background .13s,border-color .13s;animation:pop .2s}
+.qz-top{display:flex;justify-content:space-between;align-items:center;font-size:14px;color:var(--txt2);font-weight:500}
+.qz-pts{font:500 13px var(--mono);color:var(--txt)}
+.qz-bar{display:flex;gap:4px;height:4px}
+.qz-bar i{flex:1;border-radius:1px;background:var(--hover);transition:background .3s ease}
+.qz-bar i.on{background:var(--txt)}
+.qz-q{font:600 20px/1.3 var(--serif);animation:pop .2s}
+.qz-opt{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:var(--bg2);border:1px solid var(--line2);border-radius:var(--r-ctl);padding:12px 14px;font-size:15px;line-height:1.4;transition:background .13s,border-color .13s;animation:pop .2s}
 .qz-opt:hover:not(:disabled){background:var(--hover)}
 .qz-opt:disabled{cursor:default}
-.qz-opt.correct{border-color:var(--green);background:rgba(43,166,64,.14)}
-.qz-opt.wrong{border-color:var(--red);background:rgba(255,78,69,.12);animation:shake .3s}
+.qz-opt.correct{border-color:var(--green);background:rgba(127,176,138,.14)}
+.qz-opt.wrong{border-color:var(--red);background:rgba(224,122,95,.12);animation:shake .3s}
 .qz-opt.dim{opacity:.45}
-.qz-letter{width:26px;height:26px;border-radius:8px;background:#3a3a3a;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;flex:none}
-.qz-fb{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;animation:pop .2s;min-height:20px}
+.qz-letter{width:26px;height:26px;border-radius:2px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font:500 12px var(--mono);flex:none}
+.qz-fb{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;animation:pop .2s;min-height:20px}
 .qz-done{display:flex;flex-direction:column;align-items:center;gap:11px;text-align:center;padding:24px 0;animation:pop .25s}
-.qz-badge{width:74px;height:74px;border-radius:50%;background:rgba(62,166,255,.12);border:2px solid var(--blue);display:flex;align-items:center;justify-content:center;color:var(--blue)}
-.qz-score{font-size:32px;font-weight:800}
-.qz-sub{font-size:13px;color:var(--txt2);line-height:1.5}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--txt);color:var(--bg);font-weight:600;font-size:14px;border-radius:999px;padding:9px 20px;transition:opacity .15s,transform .1s}
+.qz-score{font:600 39px var(--serif)}
+.qz-gain{font:500 14px var(--mono);color:var(--txt)}
+.qz-sub{font-size:14px;color:var(--txt2);line-height:1.5}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--txt);color:var(--bg);font-weight:600;font-size:14px;border-radius:var(--r-ctl);padding:9px 20px;transition:opacity .15s,transform .1s}
 .btn:hover{opacity:.9}
 .btn:active{transform:scale(.98)}
-.btn.ghost{background:var(--raised);color:var(--txt)}
-.btn.blue{background:var(--blue);color:#04182b}
+.btn.ghost{background:none;color:var(--txt);box-shadow:inset 0 0 0 1px var(--line)}
 
 /* ── Ask AI page + Simplify page ── */
 .aiv{max-width:760px;margin:0 auto;padding:30px 0 30px;display:flex;flex-direction:column;gap:16px;min-height:calc(100vh - 140px)}
 .aiv-hero{text-align:center;padding:34px 0 8px;display:flex;flex-direction:column;align-items:center;gap:12px}
-.aiv-hero h2{font-size:26px;font-weight:700}
-.aiv-hero p{color:var(--txt2);font-size:14px;max-width:430px;line-height:1.55}
-.aiv-glow{width:60px;height:60px;border-radius:50%;background:rgba(62,166,255,.12);border:1.5px solid rgba(62,166,255,.5);display:flex;align-items:center;justify-content:center;color:var(--blue)}
+.aiv-hero h2{font:600 31px/1.2 var(--serif)}
+.aiv-hero p{color:var(--txt2);font-size:15px;max-width:440px;line-height:1.55}
 .sugg{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
-.sugg button{border:1px solid var(--line);border-radius:999px;padding:8px 15px;font-size:13.5px;color:#ddd;transition:background .13s,border-color .13s}
-.sugg button:hover{background:var(--raised);border-color:transparent}
+.sugg button{border:1px solid var(--line);border-radius:var(--r-ctl);padding:8px 14px;font-size:14px;color:var(--txt);transition:background .13s,border-color .13s}
+.sugg button:hover{background:var(--raised)}
 .aiv .chat{padding:4px 2px}
 .aiv-scroll{display:flex;flex-direction:column;gap:16px}
 .aiv-in{position:sticky;bottom:14px;margin-top:auto;background:var(--bg);padding-top:8px}
 .smp{max-width:760px;margin:0 auto;padding:26px 0;display:flex;flex-direction:column;gap:14px}
-.smp textarea{width:100%;min-height:190px;background:var(--bg2);border:1px solid #303030;border-radius:14px;padding:15px;font-size:14px;line-height:1.6;resize:vertical;transition:border-color .15s}
-.smp textarea:focus{border-color:var(--blue-d)}
+.smp textarea{width:100%;min-height:190px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);padding:15px;font-size:15px;line-height:1.6;resize:vertical;transition:border-color .15s}
+.smp textarea:focus{border-color:var(--txt2)}
 .smp-row{display:flex;align-items:center;gap:12px;justify-content:space-between;flex-wrap:wrap}
-.smp-out{background:var(--raised);border-radius:14px;padding:17px;font-size:14px;line-height:1.65;white-space:pre-wrap;animation:pop .2s}
-.smp-out h5{font-size:11px;font-weight:800;letter-spacing:1.2px;color:var(--blue);margin-bottom:9px}
+.smp-out{background:var(--raised);border-radius:var(--r);padding:17px;font-size:15px;line-height:1.65;white-space:pre-wrap;animation:pop .2s}
+.smp-out h5{font:600 20px var(--serif);margin-bottom:9px}
 
 /* ── google modal ── */
 .gm-scrim{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:90;display:flex;align-items:center;justify-content:center;animation:fade .15s;padding:20px;border:0;width:100%}
-.gm{width:400px;max-width:100%;background:#fff;color:#1f1f1f;border-radius:26px;padding:34px 30px 22px;text-align:center;animation:pop .2s;cursor:default}
-.gm h4{font-size:22px;font-weight:500;margin:16px 0 5px}
-.gm p{font-size:14px;color:#5f6368;margin-bottom:18px}
+.gm{width:400px;max-width:100%;background:var(--raised);color:var(--txt);border:1px solid var(--line2);border-radius:var(--r);padding:34px 30px 22px;text-align:center;animation:pop .2s;cursor:default}
+.gm h4{font:600 25px var(--serif);margin:16px 0 5px}
+.gm p{font-size:14px;color:var(--txt2);margin-bottom:18px}
 .gm-acc{display:flex;align-items:center;gap:13px;width:100%;padding:10px 13px;border-radius:14px;border:1px solid #dadce0;margin-top:10px;text-align:left;transition:background .12s;background:#fff}
 .gm-acc:hover{background:#f6f8fa}
 .gm-av{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:15px;flex:none}
 .gm-acc b{font-size:14px;font-weight:500;display:block;color:#1f1f1f}
 .gm-acc span{font-size:12.5px;color:#5f6368}
-.gm-note{font-size:11.5px;color:#80868b;margin-top:18px;line-height:1.55;text-align:left}
-.gm-cancel{margin-top:12px;color:#1a73e8;font-weight:500;font-size:14px;padding:8px 16px;border-radius:999px}
-.gm-cancel:hover{background:#f0f6ff}
+.gm-note{font-size:12px;color:var(--txt2);margin-top:18px;line-height:1.55;text-align:left}
+.gm-cancel{margin-top:12px;color:var(--txt);font-weight:500;font-size:14px;padding:8px 16px;border-radius:var(--r-ctl);text-decoration:underline;text-underline-offset:3px}
+.gm-cancel:hover{background:var(--hover)}
 .gm .brand{background:var(--bg);border-radius:12px;padding:10px 16px;display:inline-flex;margin-bottom:4px}
-.gm-in{width:100%;border:1px solid #dadce0;border-radius:12px;padding:12px 14px;font-size:15px;color:#1f1f1f;background:#fff;margin-top:10px;transition:border-color .15s}
-.gm-in:focus{border-color:#1a73e8}
-.gm-in::placeholder{color:#80868b}
-.gm-submit{width:100%;margin-top:14px;background:#1a73e8;color:#fff;font-weight:600;font-size:15px;border-radius:999px;padding:12px;transition:opacity .15s,transform .1s}
+.gm-in{width:100%;border:1px solid var(--line);border-radius:var(--r-ctl);padding:12px 14px;font-size:15px;color:var(--txt);background:var(--bg2);margin-top:10px;transition:border-color .15s}
+.gm-in:focus{border-color:var(--txt2)}
+.gm-in::placeholder{color:var(--txt2)}
+.gm-submit{width:100%;margin-top:14px;background:var(--txt);color:var(--bg);font-weight:600;font-size:15px;border-radius:var(--r-ctl);padding:12px;transition:opacity .15s,transform .1s}
 .gm-submit:hover{opacity:.92}
 .gm-submit:active{transform:scale(.99)}
 .gm-submit:disabled{opacity:.55;cursor:default}
-.gm-err{margin-top:12px;font-size:13px;color:#c5221f;background:#fce8e6;border-radius:10px;padding:9px 12px;text-align:left}
-.gm-ok{margin-top:12px;font-size:13px;color:#137333;background:#e6f4ea;border-radius:10px;padding:9px 12px;text-align:left}
-.gm-switch{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:14px}
-.gm-switch button{color:#1a73e8;font-weight:500;font-size:13.5px;padding:4px 6px;border-radius:8px}
-.gm-switch button:hover{background:#f0f6ff}
+.gm-err{margin-top:12px;font-size:13px;color:var(--txt);background:rgba(224,122,95,.16);border-left:3px solid var(--red);border-radius:2px;padding:9px 12px;text-align:left}
+.gm-ok{margin-top:12px;font-size:13px;color:var(--txt);background:rgba(127,176,138,.16);border-left:3px solid var(--green);border-radius:2px;padding:9px 12px;text-align:left}
+.gm-switch{display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:14px}
+.gm-switch button{color:var(--txt);font-weight:500;font-size:14px;padding:4px 6px;border-radius:2px;text-decoration:underline;text-decoration-color:var(--txt2);text-underline-offset:3px}
+.gm-switch button:hover{background:var(--hover)}
 .gm-switch span{color:#80868b;font-size:13px}
-.gm-or{display:flex;align-items:center;gap:12px;margin:18px 0 14px;color:#80868b;font-size:12.5px}
-.gm-or::before,.gm-or::after{content:"";flex:1;height:1px;background:#dadce0}
+.gm-or{display:flex;align-items:center;gap:12px;margin:18px 0 14px;color:var(--txt2);font-size:12px}
+.gm-or::before,.gm-or::after{content:"";flex:1;height:1px;background:var(--line)}
 
 
 /* ── toasts ── */
 .toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:100;align-items:center;pointer-events:none}
-.toast{background:#f1f1f1;color:#0f0f0f;font-size:13.5px;font-weight:500;border-radius:999px;padding:10px 19px;box-shadow:0 8px 24px rgba(0,0,0,.45);animation:toast-in .25s;display:flex;align-items:center;gap:9px;max-width:88vw}
+.toast{background:var(--txt);color:var(--bg);font-size:14px;font-weight:500;border-radius:var(--r-ctl);padding:10px 18px;box-shadow:0 8px 24px rgba(0,0,0,.4);animation:toast-in .25s;display:flex;align-items:center;gap:9px;max-width:88vw}
 
 /* ── keyframes ── */
 @keyframes fade{from{opacity:0}}
@@ -1660,7 +1640,7 @@ const CSS2 = `
   .player.panel-open .pl-stage{height:calc(var(--sheet-top) - var(--hd-h))}
   .player.panel-open .pl-vid{object-fit:contain}
   .player.panel-open .pl-rail,.player.panel-open .pl-info,.player.panel-open .pl-grad,.player.panel-open .pl-topline{display:none}
-  .pnl{top:var(--sheet-top);bottom:0;left:0;right:0;position:fixed;width:auto;max-width:none;border-radius:16px 16px 0 0;animation:slide-up .24s ease}
+  .pnl{top:var(--sheet-top);bottom:0;left:0;right:0;position:fixed;width:auto;max-width:none;border-radius:var(--r) var(--r) 0 0;border-width:1px 0 0;animation:slide-up .24s ease}
 
   .player.panel-open .pl-stage{transform:none}
   .aiv{padding:16px 0}
@@ -1682,41 +1662,29 @@ const CSS = CSS1 + CSS2;
 
 /* ══════════════ 7 · ATOMS — tags, meta, toasts, thumbnail art ═══════ */
 
-const BiasTag = ({ bias }) => {
-  const b = BIAS[bias] || BIAS.centre;
-  return (
-    <span className="tag" style={{ color: b.color, borderColor: b.color + "59" }}>
-      {b.label}
-    </span>
-  );
-};
-
-const FactTag = ({ fact }) => {
-  const f = FACT[fact] || FACT.verified;
-  return (
-    <span className="tag" style={{ color: f.color, borderColor: f.color + "59" }}>
-      <Icon name={f.icon} size={11} stroke={2.4} />
-      {f.label}
-    </span>
-  );
-};
+/* Bias and sourcing, said once in words (story page only). */
+function sourcingNote(story) {
+  const b = (BIAS[story.bias] || BIAS.centre).label.toLowerCase();
+  const f = story.fact === "verified" ? " Checked against other reporting."
+    : story.fact === "disputed" ? " Parts of this are disputed."
+    : " This is a summary of its reporting.";
+  return story.source + " is rated " + b + "." + f;
+}
 
 const SourceAvatar = ({ name, size = 36 }) => {
   const m = sourceMeta(name);
   return (
-    <div className="src-av" style={{ background: m.color, width: size, height: size, fontSize: size * 0.36 }}>
+    <div className="src-av" style={{ width: size, height: size, fontSize: size * 0.4 }}>
       {m.initials}
     </div>
   );
 };
 
-/** Source • bias • fact-check • timestamp — visual only, per spec (not clickable). */
-const StoryMeta = ({ story, light }) => (
-  <div className="card-meta" style={light ? { color: "#e2e2e2" } : null}>
+/** Outlet and time — nothing else on a card. */
+const StoryMeta = ({ story }) => (
+  <div className="card-meta">
     <span>{story.source}</span>
-    <BiasTag bias={story.bias} />
-    <FactTag fact={story.fact} />
-    <span className="mdot">{timeAgo(story.publishedAt)}</span>
+    <span className="when">{timeAgo(story.publishedAt)}</span>
   </div>
 );
 
@@ -1746,7 +1714,7 @@ function ThumbArt({ story, variant = "card", paused }) {
   const cat = story.category;
 
   const PAL = {
-    geopolitics: { a: "#0b1c31", b: "#17395e", acc: "#4da3ff", soft: "#9cc5f2" },
+    geopolitics: { a: "#102125", b: "#1f3d44", acc: "#e07a5f", soft: "#9db0b0" },
     finance: { a: "#0b2320", b: "#124038", acc: "#2bd4a0", soft: "#9fe8d2" },
     sports: { a: "#0d2a15", b: "#1c5a2e", acc: "#7ef29a", soft: "#c6f7d0" },
   };
@@ -1910,7 +1878,7 @@ const NAV = [
   { id: "home", label: "Home", icon: "home", short: "Home" },
   { id: "trending", label: "Trending", icon: "flame", short: "Trending" },
   { id: "saved", label: "Saved Stories", icon: "bookmark", short: "Saved" },
-  { id: "askai", label: "Ask AI", icon: "sparkle", short: "Ask AI" },
+  { id: "askai", label: "Ask AI", icon: "comment", short: "Ask AI" },
   { id: "simplify", label: "Simplify Article", icon: "fileText", short: "Simplify" },
 ];
 
@@ -1932,10 +1900,9 @@ function Header({ onMenu, onBrand, query, setQuery, onAsk, notifCount, onBell, u
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && query.trim()) onAsk(); }}
-            placeholder="Ask AI anything — what's happening today?"
+            placeholder="Ask about today's news"
             aria-label="Ask AI"
           />
-          <span className="ai-pill">AI</span>
           <button className="askbar-btn" onClick={onAsk} aria-label="Submit question">
             <Icon name="search" size={22} />
           </button>
@@ -1988,9 +1955,10 @@ function Sidebar({ mode, active, onNav }) {
       <SidebarItems active={active} onNav={onNav} mini={mini} />
       <div className="sb-sep" />
       <div className="sb-note">
-        AI-condensed news in 30 seconds. Geopolitics · Finance · Sports.
+        The day's news, 30 seconds a story.
         <br />
-        <br />© 2026 News30 · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>
+        <br />© 2026 News30
+        <br /><a href="/privacy">Privacy</a>&emsp;<a href="/terms">Terms</a>
       </div>
     </aside>
   );
@@ -2012,7 +1980,7 @@ function Drawer({ open, active, onNav, onClose }) {
         </div>
         <SidebarItems active={active} onNav={(id) => { onNav(id); onClose(); }} />
         <div className="sb-sep" />
-        <div className="sb-note">AI-condensed news in 30 seconds.<br />© 2026 News30 · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></div>
+        <div className="sb-note">The day's news, 30 seconds a story.<br /><br />© 2026 News30<br /><a href="/privacy">Privacy</a>&emsp;<a href="/terms">Terms</a></div>
       </aside>
     </React.Fragment>
   );
@@ -2066,7 +2034,7 @@ function NotifMenu({ items, onOpenStory, onMarkAll, onClose }) {
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="notif-t">{n.title}</div>
-                  <div className="notif-m">{story.source} · {timeAgo(n.at)}</div>
+                  <div className="notif-m"><span>{story.source}</span><span>{timeAgo(n.at)}</span></div>
                 </div>
                 {!n.read && <span className="notif-dot" />}
               </button>
@@ -2343,7 +2311,6 @@ function StoryCard({ story, onOpen, onCardMenu }) {
           ? <img src={story.thumbnail_url} alt="" loading="lazy" />
           : <ThumbArt story={story} />}
         {preview && <video ref={previewRef} className="hov" src={story.video_url} muted autoPlay loop playsInline preload="auto" aria-hidden="true" />}
-        <span className="badge-date">{dateBadge(story.publishedAt)}</span>
         <span className="badge-dur">{story.duration}</span>
       </div>
       <div className="card-row">
@@ -2447,16 +2414,8 @@ function ChipsRow({ category, setCategory }) {
       <div className="chips">
         {CATEGORIES.map((c) => (
           <button key={c.id} className={cls("chip", category === c.id && "on")} onClick={() => setCategory(c.id)}>
-            {c.icon && <Icon name={c.icon} size={16} stroke={2} />}
             {c.label}
           </button>
-        ))}
-        {LOCKED_CATEGORIES.map((c) => (
-          <span key={c.id} className="chip locked" title="News30 Pro — coming soon" aria-disabled="true">
-            <Icon name="lock" size={13} stroke={2.2} />
-            {c.label}
-            <span className="pro">PRO</span>
-          </span>
         ))}
       </div>
     </div>
@@ -2476,7 +2435,7 @@ function TrendingView({ feedVersion, openPlayer, onCardMenu }) {
   const items = React.useMemo(getTrending, [feedVersion]);
   return (
     <div className="page">
-      <div className="ph"><Icon name="flame" size={24} /> Trending on News30</div>
+      <div className="ph">Trending on News30</div>
       <div className="grid">
         {items.map((s, i) => (
           <StoryCard key={s.id} story={s} onOpen={() => openPlayer(s, items, i)} onCardMenu={onCardMenu} />
@@ -2493,12 +2452,12 @@ function SavedView({ savedIds, openPlayer, onCardMenu, goHome }) {
   );
   return (
     <div className="page">
-      <div className="ph"><Icon name="bookmark" size={24} /> Saved stories</div>
+      <div className="ph">Saved stories</div>
       {items.length === 0 ? (
         <div className="empty">
           <Icon name="bookmark" size={34} />
           <b>No saved stories yet</b>
-          <span>Tap the ⋮ menu on any story — or Save inside the player — and it lands here.</span>
+          <span>Use the ⋮ menu on any story, or Save in the player, and it lands here.</span>
           <button className="btn" onClick={goHome}>Browse today's stories</button>
         </div>
       ) : (
@@ -2613,9 +2572,8 @@ function AskAIView({ thread, busy, onAsk }) {
         <div className="aiv-scroll" ref={scrollRef}>
           {thread.length === 0 && (
             <div className="aiv-hero">
-              <div className="aiv-glow"><Icon name="sparkle" size={28} /></div>
-              <h2>Ask AI anything</h2>
-              <p>Live answers about geopolitics, finance and sport — grounded in today's news, with web search when it helps.</p>
+              <h2>Ask about the news</h2>
+              <p>Answers about geopolitics, finance and sport, grounded in today's news and the web when it helps.</p>
               <div className="sugg">
                 {SUGGESTIONS.map((s) => (
                   <button key={s} onPointerDown={keepFocus} onClick={() => onAsk(s)}>{s}</button>
@@ -2647,7 +2605,7 @@ function AskAIView({ thread, busy, onAsk }) {
               <Icon name="send" size={17} />
             </button>
           </div>
-          <div className="chat-hint">Answers can use live web search · verify important facts</div>
+          <div className="chat-hint">Answers can use live web search. Check anything important.</div>
         </div>
       </div>
     </div>
@@ -2659,9 +2617,8 @@ function SimplifyView({ text, setText, result, busy, onRun }) {
     <div className="page">
       <div className="smp">
         <div className="aiv-hero" style={{ padding: "26px 0 4px" }}>
-          <div className="aiv-glow"><Icon name="fileText" size={26} /></div>
-          <h2>Simplify any article</h2>
-          <p>Paste an article or dense paragraph — get it back in plain English, every fact intact.</p>
+          <h2>Simplify an article</h2>
+          <p>Paste an article or a dense paragraph and get it back in plain English, with every fact intact.</p>
         </div>
         <textarea
           value={text}
@@ -2671,14 +2628,14 @@ function SimplifyView({ text, setText, result, busy, onRun }) {
         />
         <div className="smp-row">
           <span style={{ fontSize: 12.5, color: "var(--txt2)" }}>{text.trim() ? text.trim().split(/\s+/).length + " words" : "Waiting for text"}</span>
-          <button className="btn blue" onClick={onRun} disabled={!text.trim() || busy}>
-            <Icon name="sparkle" size={16} /> {busy ? "Simplifying…" : "Simplify"}
+          <button className="btn" onClick={onRun} disabled={!text.trim() || busy}>
+            {busy ? "Simplifying…" : "Simplify"}
           </button>
         </div>
         {busy && <div className="regen"><div className="spin" /> Rewriting in plain English…</div>}
         {!busy && result && (
           <div className="smp-out">
-            <h5>PLAIN-ENGLISH VERSION</h5>
+            <h5>Plain-English version</h5>
             {result}
             <div style={{ marginTop: 14 }}>
               <button className="btn ghost" onClick={() => copyText(result)}>
@@ -2837,12 +2794,14 @@ function getSummary(story, mode) {
      generic filler below (which invented context like "a crowded
      diplomatic calendar" and a fact-check that didn't exist). */
   if (story.script) {
-    const sentences = (story.script.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [story.script])
+    const script = story.script.replace(/^\s*your news in 30 seconds[.!]?\s*/i, "");
+    const sentences = (script.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [])
       .map((x) => x.trim()).filter(Boolean);
+    if (!sentences.length) sentences.push(script.trim());
     const sources = [[story.source, "Original report"]];
     const points = sentences.slice(0, 4);
     if (mode === "simple") return { intro: [sentences.slice(0, 2).join(" ")], points: points.slice(0, 2), sources };
-    if (mode === "detailed") return { intro: [story.script.trim()], points: sentences, sources };
+    if (mode === "detailed") return { intro: [script.trim()], points: sentences, sources };
     return { intro: [sentences.slice(0, 3).join(" ")], points, sources };
   }
   const c = CURATED_INSIGHT[story.id];
@@ -3022,7 +2981,7 @@ function AskChat({ story, thread, busy, draft, setDraft, ask, inputRef, onClose 
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") ask(draft); }}
-            placeholder="Ask AI about this story…"
+            placeholder="Ask about this story…"
             aria-label="Ask about this story"
             enterKeyHint="send"
           />
@@ -3042,7 +3001,7 @@ function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
   return (
     <div className="pnl" role="dialog" aria-label={title}>
       <div className="pnl-h">
-        <h3><Icon name={icon} size={19} /> {title}</h3>
+        <h3>{icon && <Icon name={icon} size={19} />} {title}</h3>
         {headerExtra}
         <button className="ibtn" onClick={onClose} onPointerDown={closeOnTouch} aria-label="Close panel">
           <Icon name="x" size={20} />
@@ -3056,7 +3015,7 @@ function SlidePanel({ title, icon, headerExtra, footer, onClose, children }) {
 
 const SUMMARY_MODES = [
   { id: "standard", label: "Standard", icon: "fileText" },
-  { id: "simple", label: "Simplify", icon: "sparkle" },
+  { id: "simple", label: "Simplify", icon: "comment" },
   { id: "detailed", label: "More detail", icon: "search" },
 ];
 
@@ -3130,7 +3089,6 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
   return (
     <SlidePanel
       title="Summary"
-      icon="comment"
       onClose={onClose}
       headerExtra={
         <button className="ibtn" onClick={() => setTuneOpen((o) => !o)} aria-label="Summary options">
@@ -3139,7 +3097,7 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
       }
       footer={mobile && chatOpen ? null : mobile ? (
         <button className="ask-fake" onClick={openChat} aria-label="Ask AI about this story">
-          Ask AI about this story…
+          Ask about this story…
           <span className="send" aria-hidden="true"><Icon name="send" size={16} /></span>
         </button>
       ) : (
@@ -3148,7 +3106,7 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") ask(draft); }}
-            placeholder="Ask AI about this story…"
+            placeholder="Ask about this story…"
             aria-label="Ask about this story"
           />
           <button className="send" onPointerDown={keepFocus} onClick={() => ask(draft)} disabled={!draft.trim() || busy} aria-label="Send">
@@ -3175,37 +3133,26 @@ function SummaryPanel({ story, onClose, onChatOpen, onChatClose }) {
       ) : (
         <React.Fragment>
           {mode !== "standard" && (
-            <span className="mode-pill">
-              <Icon name={modeMeta.icon} size={12} stroke={2.4} />
-              {mode === "simple" ? "SIMPLIFIED" : "DETAILED"} VIEW
-            </span>
+            <div className="sum-mode">{mode === "simple" ? "Simplified version" : "Detailed version"}</div>
           )}
           {s.intro.map((p, i) => (
             <p className="sum-p" key={i}>{p}</p>
           ))}
-          <div className="sum-sec">KEY POINTS</div>
-          {s.points.map((p, i) => (
-            <div className="sum-li" key={i}>
-              <i><Icon name="checkCircle" size={15} /></i>
-              {p}
-            </div>
-          ))}
-          <div className="sum-sec">SOURCES</div>
-          {s.sources.map(([name, note]) => (
-            <div className="sum-src" key={name}>
-              <SourceAvatar name={name} size={28} />
-              <div>
-                {name}
-                <small>{note}</small>
-              </div>
-            </div>
-          ))}
+          <h4 className="sum-sec">Key points</h4>
+          <ol className="sum-ol">
+            {s.points.map((p, i) => <li key={i}>{p}</li>)}
+          </ol>
+          <h4 className="sum-sec">Source</h4>
+          <p className="sum-src">
+            Reporting by {s.sources.map(([name]) => name).join(" and ")}.
+            {story.url && <> <a href={story.url} target="_blank" rel="noopener">Read the original report</a></>}
+          </p>
         </React.Fragment>
       )}
 
       {(thread.length > 0 || busy) && (
         <React.Fragment>
-          <div className="sum-sec">ASK ABOUT THIS STORY</div>
+          <h4 className="sum-sec">Your questions</h4>
           <div className="chat">
             {thread.map((m, i) => (
               <div key={i} className={cls("msg", m.role === "user" ? "user" : "ai")}>{m.text}</div>
@@ -3269,14 +3216,16 @@ function QuizPanel({ story, user, dispatch, onClose }) {
   const retake = () => { setQi(0); setSel(null); setAnswers([]); setDone(false); };
 
   return (
-    <SlidePanel title="Quiz" icon="bolt" onClose={onClose}>
+    <SlidePanel title="Quiz" onClose={onClose}>
       {!done ? (
         <React.Fragment>
           <div className="qz-top">
             <span>Question {qi + 1} of {quiz.length}</span>
-            <span className="qz-pts"><Icon name="star" size={14} filled /> {points} pts</span>
+            <span className="qz-pts">{points} points</span>
           </div>
-          <div className="qz-bar"><i style={{ width: ((qi + (sel !== null ? 1 : 0)) / quiz.length) * 100 + "%" }} /></div>
+          <div className="qz-bar">
+            {quiz.map((_, i) => <i key={i} className={i < qi + (sel !== null ? 1 : 0) ? "on" : undefined} />)}
+          </div>
           <div className="qz-q" key={qi}>{q.q}</div>
           {q.opts.map((opt, i) => {
             const state =
@@ -3291,29 +3240,28 @@ function QuizPanel({ story, user, dispatch, onClose }) {
           <div className="qz-fb">
             {sel !== null && (sel === q.correct ? (
               <span style={{ color: "var(--green)", display: "flex", alignItems: "center", gap: 7 }}>
-                <Icon name="checkCircle" size={17} /> Correct · +{POINTS_PER_CORRECT} pts
+                <Icon name="check" size={17} stroke={2.4} /> Correct. {POINTS_PER_CORRECT} points.
               </span>
             ) : (
               <span style={{ color: "var(--red)", display: "flex", alignItems: "center", gap: 7 }}>
-                <Icon name="x" size={17} stroke={2.6} /> Not quite — the right answer is highlighted
+                <Icon name="x" size={17} stroke={2.4} /> Not quite. The right answer is highlighted.
               </span>
             ))}
           </div>
         </React.Fragment>
       ) : (
         <div className="qz-done">
-          <div className="qz-badge"><Icon name="bolt" size={30} filled /></div>
-          <div className="qz-score">{nCorrect}/{quiz.length}</div>
-          <div style={{ color: "var(--blue)", fontWeight: 800, fontSize: 17 }}>+{points} pts</div>
+          <div className="qz-score">{nCorrect} of {quiz.length}</div>
+          <div className="qz-gain">{points} points</div>
           <div className="qz-sub">
             {awardedRef.current && user
               ? "Saved to your profile — open the avatar menu to see your totals."
               : user
                 ? "Practice round — points were counted on your first run."
-                : "Sign in with Google to keep your points, streak and accuracy."}
+                : "Sign in to keep your points, streak and accuracy."}
           </div>
           <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-            <button className="btn ghost" onClick={retake}><Icon name="bolt" size={15} /> Retake</button>
+            <button className="btn ghost" onClick={retake}>Retake</button>
             <button className="btn" onClick={onClose}>Done</button>
           </div>
         </div>
@@ -3352,15 +3300,14 @@ function VideoGenPanel({ story, onClose }) {
   const stageIndex = VIDEO_STAGES.findIndex((s) => s.key === state);
 
   return (
-    <SlidePanel title="Generate Video" icon="sparkle" onClose={onClose}>
+    <SlidePanel title="Generate video" onClose={onClose}>
       {state === "idle" && (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, textAlign: "center", padding: "20px 0" }}>
-          <div className="aiv-glow"><Icon name="sparkle" size={26} /></div>
           <p className="sum-p" style={{ maxWidth: 280 }}>
-            Turns this story into a real 30-second video — AI script, AI narration, and real footage, assembled automatically.
+            Turns this story into a 30-second video: script, narration and footage, assembled automatically.
           </p>
-          <button className="btn blue" onClick={start}>
-            <Icon name="sparkle" size={16} /> Generate video
+          <button className="btn" onClick={start}>
+            Generate video
           </button>
         </div>
       )}
@@ -3382,7 +3329,7 @@ function VideoGenPanel({ story, onClose }) {
             </div>
           ))}
           <div className="chat-hint" style={{ marginTop: 4 }}>
-            This can take a minute or two — real rendering, not a shortcut.
+            This can take a minute or two.
           </div>
         </div>
       )}
@@ -3391,7 +3338,7 @@ function VideoGenPanel({ story, onClose }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <video controls src={videoUrl} style={{ width: "100%", borderRadius: 12, background: "#000" }} />
           <button className="btn ghost" onClick={start}>
-            <Icon name="sparkle" size={15} /> Regenerate
+            Regenerate
           </button>
         </div>
       )}
@@ -3412,53 +3359,62 @@ function VideoGenPanel({ story, onClose }) {
    came from, the quiz, a large "Up next", and the transcript (also keeps
    the transcript text in the rendered page, which crawlers read). Only
    rendered when the player is in its wide (≥1024px) layout. */
+/* The 30-second clock: one tick per second of the story, lit as it plays.
+   It is the one coloured element on the page (--clock). */
+function TickClock({ progress, seconds, className = "pl-prog" }) {
+  const n = Math.max(1, Math.round(seconds || 30));
+  const lit = Math.min(n, Math.round(progress * n));
+  return (
+    <div className={className} aria-hidden="true">
+      {Array.from({ length: n }, (_, i) => <i key={i} className={i < lit ? "on" : undefined} />)}
+    </div>
+  );
+}
+
 function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, openQuiz, panel, setPanel, children }) {
-  const catIcon = (CATEGORIES.find((c) => c.id === story.category) || {}).icon || "globe";
   const nextStory = list[index + 1];
   const more = list.slice(index + 2, index + 8);
-  const remaining = Math.max(0, Math.ceil((story.durationSec || 30) * (1 - progress)));
+  const total = story.durationSec || 30;
+  const remaining = Math.max(0, Math.ceil(total * (1 - progress)));
+  const unlockIn = Math.max(0, Math.ceil(total * (0.9 - progress)));
   const thumbOf = (s) => (s.thumbnail_url ? <img src={s.thumbnail_url} alt="" loading="lazy" /> : <ThumbArt story={s} />);
-  const unlockPct = Math.min(100, Math.round((progress / 0.9) * 100));
+  const togglePanel = (name) => (e) => { e.preventDefault(); setPanel(panel === name ? null : name); };
   return (
     <aside className="pl-side" aria-label="About this story">
       <div className="ws-scroll">
         <div>
-          <div className="ws-kick">
-            <span className="chip-cat"><Icon name={catIcon} size={14} stroke={2.2} /> {catLabel(story.category)}</span>
-            <span>{timeAgo(story.publishedAt)}</span>
-          </div>
+          <div className="ws-kick">{catLabel(story.category)}</div>
           <h1 className="ws-title">{story.headline}</h1>
-          <div className="ws-src">
-            <span>Source: <b>{story.source}</b></span>
-            <BiasTag bias={story.bias} />
-            <FactTag fact={story.fact} />
-          </div>
-          {story.url && (
-            <a className="ws-orig" href={story.url} target="_blank" rel="noopener">
-              Read the original at {story.source} <Icon name="externalLink" size={15} stroke={2} />
-            </a>
-          )}
+          <p className="ws-src">Reported by {story.source}, {timeAgo(story.publishedAt)}.</p>
+          <p className="ws-note">
+            {sourcingNote(story)}
+            {story.url && <> <a href={story.url} target="_blank" rel="noopener">Read the original report</a></>}
+          </p>
+          <div className="ws-clock">{fmtDurAny(total * progress)} <span>of {fmtDurAny(total)}</span></div>
         </div>
 
-        <div className="ws-row">
-          <button className={cls("ws-btn", panel === "summary" && "on")} onClick={() => setPanel(panel === "summary" ? null : "summary")}>
-            <Icon name="comment" size={18} /> Summary &amp; Ask AI
-          </button>
+        <div className="ws-links">
+          <a href="#summary" role="button" className={cls("ws-link", panel === "summary" && "on")} onClick={togglePanel("summary")}>Read the summary</a>
+          <a href="#ask" role="button" className="ws-link" onClick={(e) => {
+            e.preventDefault(); setPanel("summary");
+            setTimeout(() => { const el = document.querySelector(".pl-side .pnl .ask-in input"); if (el) el.focus(); }, 60);
+          }}>Ask about this story</a>
         </div>
 
         {quiz && (
-          <div className="ws-card ws-quiz">
-            <span className="ic-wrap"><Icon name={quizUnlocked ? "bolt" : "lock"} size={20} /></span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="ws-quiz-t">Test yourself · {quiz.length} questions</div>
-              {quizUnlocked
-                ? <div className="ws-quiz-s">Unlocked — see how much you took in.</div>
-                : <>
-                    <div className="ws-quiz-s">Unlocks when you finish the video</div>
-                    <div className="ws-bar"><i style={{ width: unlockPct + "%" }} /></div>
-                  </>}
-            </div>
-            {quizUnlocked && <button className="ws-btn on" style={{ flex: "none", padding: "0 18px" }} onClick={openQuiz}>Take quiz</button>}
+          <div>
+            <div className="ws-quiz-t">Quiz</div>
+            {quizUnlocked ? (
+              <p className="ws-quiz-s">
+                {quiz.length === 3 ? "Three" : quiz.length} questions on this story.{" "}
+                <a href="#quiz" role="button" className="ws-link" onClick={(e) => { e.preventDefault(); openQuiz(); }}>Take the quiz</a>
+              </p>
+            ) : (
+              <p className="ws-quiz-s">
+                {quiz.length === 3 ? "Three" : quiz.length} questions on this story, after you've watched it.
+                {progress > 0 && <> Available in <b>{fmtDurAny(unlockIn)}</b>.</>}
+              </p>
+            )}
           </div>
         )}
 
@@ -3466,15 +3422,13 @@ function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, o
           <section>
             <div className="ws-h">
               <h2>Up next</h2>
-              <span>{progress > 0 && progress < 1 ? "Plays automatically in " + remaining + "s" : "Plays automatically"}</span>
+              <span>{progress > 0 && progress < 1 ? "Plays in " + remaining + " s" : "Plays automatically"}</span>
             </div>
             <button className="ws-up" onClick={() => onJump(index + 1)} aria-label={"Watch next: " + nextStory.headline}>
               <span className="tn">{thumbOf(nextStory)}<span className="dur">{nextStory.duration}</span></span>
               <span style={{ minWidth: 0 }}>
-                <span className="ws-up-l">Next story</span>
                 <span className="ws-up-t" style={{ display: "-webkit-box" }}>{nextStory.headline}</span>
-                <span className="ws-up-m" style={{ display: "block" }}>{nextStory.source} · {catLabel(nextStory.category)}</span>
-                <span className="ws-play"><Icon name="play" size={16} /> Watch next</span>
+                <span className="ws-up-m"><span>{nextStory.source}</span><span>{catLabel(nextStory.category)}</span></span>
               </span>
             </button>
             {more.length > 0 && (
@@ -3485,7 +3439,7 @@ function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, o
                       <span className="tn">{thumbOf(s)}</span>
                       <span style={{ minWidth: 0 }}>
                         <span className="ws-item-t" style={{ display: "-webkit-box" }}>{s.headline}</span>
-                        <span className="ws-item-m" style={{ display: "block" }}>{s.source} · {s.duration}</span>
+                        <span className="ws-item-m"><span>{s.source}</span><span className="when">{s.duration}</span></span>
                       </span>
                     </button>
                   </li>
@@ -3496,14 +3450,14 @@ function WatchSide({ story, list, index, onJump, progress, quiz, quizUnlocked, o
         )}
 
         {story.script && (
-          <details className="ws-card ws-tx">
+          <details className="ws-tx">
             <summary>Transcript</summary>
             <p>{story.script}</p>
           </details>
         )}
 
         <div className="ws-keys">
-          <kbd>↓</kbd> next · <kbd>↑</kbd> previous · <kbd>Space</kbd> pause · <kbd>M</kbd> sound
+          <span><kbd>↓</kbd>Next</span><span><kbd>↑</kbd>Previous</span><span><kbd>Space</kbd>Pause</span><span><kbd>M</kbd>Sound</span>
         </div>
       </div>
       {children}
@@ -3822,8 +3776,6 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
     if (Math.abs(dy) > 60 && Math.abs(dy) > Math.abs(dx)) { if (dy < 0) next(); else prev(); }
   };
 
-  const catIcon = (CATEGORIES.find((c) => c.id === story.category) || {}).icon || "globe";
-
   /* Summary / Quiz panels. On phones and tablets they sit where they
      always have; in the wide layout they open over the side column. */
   const panels = (
@@ -3881,7 +3833,7 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
             </button>
           )}
           <div className={cls("pl-topline", !chromeVisible && "pl-fade")}>
-            <span className="pl-cat"><Icon name={catIcon} size={14} stroke={2.2} /> {catLabel(story.category)}</span>
+            <span className="pl-cat">{catLabel(story.category)}</span>
           </div>
           {ppKey > 0 && (
             <div className="pl-pp" key={ppKey}>
@@ -3889,16 +3841,13 @@ const isSaved = userData.engagement.savedIds.includes(story.id);
             </div>
           )}
           <div className={cls("pl-info", !chromeVisible && "pl-fade")}>
-            <span className="pl-kick">{story.kicker}</span>
             <div className="pl-headline">{story.headline}</div>
             <div className="pl-sub">
               <span>{story.source}</span>
-              <BiasTag bias={story.bias} />
-              <FactTag fact={story.fact} />
-              <span className="mdot">{timeAgo(story.publishedAt)}</span>
+              <span className="when">{timeAgo(story.publishedAt)}</span>
             </div>
           </div>
-          <div className="pl-prog"><i style={{ width: progress * 100 + "%" }} /></div>
+          <TickClock progress={progress} seconds={story.durationSec} />
         </div>
 
         <div className="pl-rail">
@@ -4046,7 +3995,7 @@ function App({ handoff } = {}) {
 
     const font = document.createElement("link");
     font.rel = "stylesheet";
-    font.href = "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;800&display=swap";
+    font.href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap";
     document.head.appendChild(font);
 
     let fav = document.querySelector('link[rel="icon"]');
@@ -4366,7 +4315,7 @@ is restored when the player closes. */
               <Icon name="share" size={19} /> Copy link
             </button>
             <button onClick={() => askAboutCard(cardMenu.story)}>
-              <Icon name="sparkle" size={19} /> Ask AI about this
+              <Icon name="comment" size={19} /> Ask AI about this
             </button>
           </div>
         </React.Fragment>
